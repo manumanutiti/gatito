@@ -169,6 +169,11 @@ def notify(kind: str, title: str, body: str = '', url: str = '/', tag: str | Non
 
 def notify_bg(*a, **k):
     """Same as notify, without waiting for the network."""
+    try:   # the notification reaches your own devices: with the real values, not the placeholders
+        import mask
+        a = tuple(mask.unmask(x) if i in (1, 2) else x for i, x in enumerate(a))
+    except Exception:
+        pass
     threading.Thread(target=notify, args=a, kwargs=k, daemon=True).start()
 
 

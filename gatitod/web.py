@@ -31,6 +31,7 @@ import core
 import debug
 import convo
 import history
+import mask
 import modlink
 import profiles
 import hostinfo
@@ -142,20 +143,77 @@ def api(method: str, path: str):
     return deco
 
 
+# Anonymization (mask.py): with `anon` in the body, what you type leaves for Claude with
+# placeholders; what comes back (conversation, summaries, list, router) is always shown
+# with the real values, except /api/convo?raw=1 (exactly what the AI saw).
+def _out(b: dict, text: str | None) -> str | None:
+    """A message for an agent: masked if the chat has anonymization on."""
+    return mask.mask_message(text) if b.get('anon') and text else text
+
+
+def _plain_out(b: dict, text: str | None) -> str | None:
+    """Same, without the note for the AI (names, the router)."""
+    return mask.mask(text)['text'] if b.get('anon') and text else text
+
+
+AGENT_TEXT = ('name', 'result', 'needs', 'detail', 'suggestedReply')
+
+
+def _agent_view(a: dict) -> dict:
+    a = {**a, **{k: mask.unmask(a[k]) for k in AGENT_TEXT if isinstance(a.get(k), str)}}
+    p = a.get('perm')
+    if p:
+        qs = (p.get('input') or {}).get('questions') if isinstance(p.get('input'), dict) else None
+        # the answer goes back keyed by the question exactly as the AI wrote it
+        a['perm'] = {**p, 'input': mask.unmask_obj(p.get('input')),
+                     'qkeys': [q.get('question', '') for q in qs or []]}
+    return a
+
+
 @api('GET', '/api/agents')
 def _agents(q):
-    return core.list_agents()
+    return [_agent_view(a) for a in core.list_agents()]
 
 
 @api('GET', '/api/convo')
 def _convo(q):
-    return convo.read_messages(q.get('transcript', ''), 120)
+    msgs = convo.read_messages(q.get('transcript', ''), 120)
+    if q.get('raw') == '1':
+        return msgs
+    return [m if m.get('kind') == 'image' else mask.unmask_obj(m) for m in msgs]
 
 
 @api('GET', '/api/summary')
 def _summary(q):
     # Haiku only when you ask: with cached=1 it returns what is already saved
-    return convo.summarize(q.get('transcript', ''), q.get('sid', ''), q.get('cached') == '1')
+    s = convo.summarize(q.get('transcript', ''), q.get('sid', ''), q.get('cached') == '1')
+    return {**s, 'summary': mask.unmask(s.get('summary'))}
+
+
+@api('GET', '/api/mask')
+def _mask_get(q):
+    return mask.public()
+
+
+@api('POST', '/api/mask/save')
+def _mask_save(b):
+    return mask.save(b)
+
+
+@api('POST', '/api/mask/preview')
+def _mask_preview(b):
+    """What would leave for Claude (without remembering what the detectors find)."""
+    return mask.mask(b.get('text') or '', learn=False, entries=b.get('entries'))
+
+
+@api('POST', '/api/mask/unmask')
+def _mask_unmask(b):
+    return {'text': mask.unmask(b.get('text') or '')}
+
+
+@api('POST', '/api/mask/forget')
+def _mask_forget(b):
+    return mask.forget(b.get('real'))
 
 
 @api('GET', '/api/meta')
@@ -202,14 +260,16 @@ def _profile(q):
 
 @api('POST', '/api/route')
 def _route(b):
-    return router.route(b.get('text', ''), b.get('project_id') or None, b.get('images'))
+    # what the router answers or rewrites comes back with the real values
+    return mask.unmask_obj(router.route(_plain_out(b, b.get('text', '')), b.get('project_id') or None,
+                                        b.get('images')))
 
 
 @api('POST', '/api/launch')
 def _launch(b):
     # without `path`: no project, in a new folder. Without `worktree`, the profile's
-    return core.launch_agent(b.get('path') or None, b['task'], b.get('model'), b.get('name'),
-                             b.get('mode'), b.get('effort'),
+    return core.launch_agent(b.get('path') or None, _out(b, b['task']), b.get('model'),
+                             _plain_out(b, b.get('name')), b.get('mode'), b.get('effort'),
                              bool(b['worktree']) if 'worktree' in b else None, b.get('profile') or None)
 
 
@@ -219,29 +279,30 @@ def _ask_continue(b):
     q, a = b['question'].strip(), (b.get('answer') or '').strip()
     task = ('We are continuing a conversation that started in gatito.\n\n'
             f'My question: {q}\n\nYour answer: {a}\n\nNow: {b["text"].strip()}')
-    return core.launch_agent(None, task, b.get('model'), f'chat: {q[:40]}',
+    return core.launch_agent(None, _out(b, task), b.get('model'), _plain_out(b, f'chat: {q[:40]}'),
                              b.get('mode'), b.get('effort'), profile=b.get('profile') or None)
 
 
 @api('POST', '/api/reply')
 def _reply(b):
-    return core.reply_agent(b.get('id') or '', b['session_id'], b['text'], b.get('model') or None,
+    return core.reply_agent(b.get('id') or '', b['session_id'], _out(b, b['text']), b.get('model') or None,
                             b.get('mode') or None, b.get('effort') or None)
 
 
 @api('POST', '/api/attach-project')
 def _attach_project(b):
-    return core.attach_project(b.get('id') or '', b['session_id'], b['project_id'], b.get('text') or '')
+    return core.attach_project(b.get('id') or '', b['session_id'], b['project_id'],
+                               _plain_out(b, b.get('text') or ''))
 
 
 @api('POST', '/api/perm/answer')
 def _perm_answer(b):
-    return modlink.answer(b['id'], b.get('answers') or {})
+    return modlink.answer(b['id'], {k: _plain_out(b, str(v)) for k, v in (b.get('answers') or {}).items()})
 
 
 @api('POST', '/api/perm/decide')
 def _perm_decide(b):
-    return modlink.decide(b['id'], b['behavior'], bool(b.get('always')), b.get('message') or '')
+    return modlink.decide(b['id'], b['behavior'], bool(b.get('always')), _plain_out(b, b.get('message') or ''))
 
 
 @api('POST', '/api/hide')
@@ -280,7 +341,8 @@ def _action(b):
 # history
 @api('GET', '/api/history')
 def _hist(q):
-    return history.search(q.get('q', ''), int(q.get('limit', 40)), int(q.get('offset', 0)))
+    r = history.search(q.get('q', ''), int(q.get('limit', 40)), int(q.get('offset', 0)))
+    return {**r, 'items': [mask.unmask_obj(s, skip=('sid', 'transcript', 'cwd')) for s in r['items']]}
 
 
 @api('POST', '/api/history/resume')
@@ -288,7 +350,7 @@ def _hist_resume(b):
     s = history.get(b['sid'])
     if not s:
         return {'ok': False, 'err': 'that conversation is gone'}
-    return core.resume_session(s['sid'], s['cwd'], b['text'], b.get('model') or None,
+    return core.resume_session(s['sid'], s['cwd'], _out(b, b['text']), b.get('model') or None,
                                b.get('mode') or None, b.get('effort') or None)
 
 

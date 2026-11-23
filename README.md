@@ -22,6 +22,8 @@ on the home network.
 - `gatitod/static/`    — `app.css` and one JS per view: `util.js` (shared), `sessions.js`,
   `board.js` (kanban + edit sheet), `week.js` (week), `art.js` (artifacts),
   `main.js` (navigation and refresh).
+- `gatitod/mask.py`    — pseudo-anonymization of what is sent to Claude (dictionary, detectors,
+  vault) and putting the real values back on display (`static/js/mask.js`, `static/mask.css`).
 - `gatitod/artifacts.py` — versioned artifact store (`state/artifacts`).
 - `gatitod/notebooks.py` — notebooks: Markdown notes with metadata in `notebooks/` (Notebooks
   view, `static/js/nb.js` and `static/nb.css`; `bin/notebook` and the "notebook" skill for agents).
@@ -172,6 +174,37 @@ At the end of the session list, **History** gathers all your Claude Code convers
 including terminal ones you already closed, with search (title, first message and
 folder). They open to read and, by typing below, continue in the background
 (`claude --bg --resume` in their folder): they become one more gatito session.
+
+## Anonymize
+
+The mask button in the composer (and the **Anonymize** chip under a conversation) turns on
+pseudo-anonymization: what you type leaves for Claude with placeholders, and gatito shows
+you the answers with the real values again (`gatitod/mask.py`, idea taken from maskit).
+It covers launches, replies, the router, questions with options, permission messages and
+backlog tasks (each task stores its own switch).
+
+- **Your list** (list button next to the mask, or **Placeholders**): real value → placeholder,
+  with a kind (tenant, tenant/subscription/app id, subscription, resource group, cluster,
+  namespace, Key Vault, storage, registry, VNet, DevOps org/project, repo, pipeline, domain,
+  host, person…). **Cloud and DevOps rows** adds the usual ones with a suggested placeholder
+  that respects each resource's naming rules. Case is kept both ways (`ACME` ↔
+  `TENANT-ALPHA`), and it is replaced inside names (`rg-acme-prod`, `api.acme.com`)
+  but not in the middle of a word.
+- **Automatic detection**: secrets (keys, tokens, passwords, connection strings, JWT, private
+  keys), Azure resource ids (resource group and resource names), AWS ARNs and account ids,
+  GUIDs, e-mails and IPv4. The IPs keep their subnets (a prefix-preserving permutation:
+  `10.20.30.40` and `10.20.30.41` stay in the same fake /24, private stays private) and an
+  IP the AI invents inside a fake subnet goes back to the real one. Public DNS, the Azure
+  built-in roles and well-known app ids are never masked; add your own exceptions.
+- What the detectors find is remembered in `state/mask/vault.json`: the same value always
+  gets the same placeholder, in every chat, so old conversations can still be shown with
+  the real values. **Learned by the detectors** lists and forgets them.
+- **As sent / Real values** in a conversation's header shows exactly what the AI saw.
+  **Try it** previews what would leave, or puts the real values back in pasted text.
+
+Only what you type is masked: an agent that reads files or runs commands on your machine
+sees their real contents, and the commands it writes carry the placeholders. It is meant to
+avoid leaking names easily in questions and designs, not as a guarantee.
 
 ## Panels
 

@@ -81,6 +81,10 @@ function renderDetail(full){
   if(!hist)acts.push(a.group==='archive'
     ?`<button class="btn ghost" data-act="unhide" title="Restore" aria-label="Restore">${ICON('restore')}<span class="btn-t">Restore</span></button>`
     :`<button class="btn ghost" data-act="hide" title="Archive" aria-label="Archive">${ICON('archive')}<span class="btn-t">Archive</span></button>`);
+  // the conversation with the real values, or exactly as the AI saw it (placeholders)
+  if(a.transcript)acts.push(`<button class="btn ghost" data-act="raw" aria-pressed="${!!CONVO.raw}"
+    title="${CONVO.raw?'Showing what the AI saw (placeholders): press to see the real values':'Show the conversation as it was sent to the AI (placeholders)'}"
+    aria-label="As sent">${ICON('eye')}<span class="btn-t">${CONVO.raw?'As sent':'Real values'}</span></button>`);
   if(a.kind==='background')acts.push(`<button class="btn ghost danger" data-act="remove" title="Delete" aria-label="Delete">${ICON('trash')}<span class="btn-t">Delete</span></button>`);
 
   const head=`<div class="d-head">
@@ -123,7 +127,9 @@ function renderDetail(full){
       ?`<button class="chip" data-chip="${esc(a.suggestedReply)}">${esc(a.suggestedReply)}</button>`:''}
       <button class="chip" data-chip="${esc(DIAG)}">Ask for a diagram</button>
       <button class="chip" data-chip="${esc(INFRA)}">Infra diagram</button>
-      ${a.worktreeBranch?`<button class="chip" data-chip="${esc(MERGE)}">Merge into the main branch</button>`:''}${bg?ropts:''}</div>`;
+      ${a.worktreeBranch?`<button class="chip" data-chip="${esc(MERGE)}">Merge into the main branch</button>`:''}
+      <button class="chip" type="button" data-anon-tog aria-pressed="${anonOn()}" title="Anonymize what you send: real names leave as placeholders">${ICON('mask')}Anonymize</button>
+      <button class="chip" type="button" data-anon-cfg title="Edit the placeholders">Placeholders</button>${bg?ropts:''}</div>`;
     const ph=hist?'Continue this conversation in the background…':a.perm?'Reason to deny, or an instruction…'
       :a.live==='working'?'Send an instruction (it reaches it when it finishes what it is doing)…':a.live?'Write to this session…'
       :a.ui==='blocked'?'Reply…':a.ui==='done'?'Continue this session with a new instruction…':'Send an instruction (interrupts and resumes)…';
@@ -141,7 +147,7 @@ function renderDetail(full){
     clearAtt('r');
     $('#detail').innerHTML=head+`<div class="d-body" id="d-body"><div class="d-inner">
       <div id="d-call">${call}</div><div id="d-convo"></div><div id="d-typing"></div><div id="d-ask">${ask}</div></div></div>`+reply;
-    wireDetail(); wbDraw(); loadWhiteboard(true);
+    wireDetail(); wbDraw(); loadWhiteboard(true); paintAnon();
   }else{
     // light refresh: header and alerts, without touching what you're typing
     const h=$('#detail .d-head'); if(h){h.outerHTML=head;}
@@ -227,11 +233,12 @@ async function answerAsk(){
     const q=qs[+box.dataset.q]; if(!q)return;
     const other=box.querySelector('.ask-other').value.trim();
     const sel=[...box.querySelectorAll('.ask-opt.on')].map(b=>b.dataset.opt);
-    const v=other||sel.join(', '); if(v)answers[q.question]=v;
+    // keyed by the question exactly as the AI wrote it (the screen shows the real values)
+    const v=other||sel.join(', '); if(v)answers[(a.perm.qkeys||[])[+box.dataset.q]||q.question]=v;
   });
   if(!Object.keys(answers).length)return toast('Pick an option or type your answer',true);
   $('#detail').querySelectorAll('[data-ask]').forEach(b=>b.disabled=true);
-  const r=await api('/api/perm/answer',{id:a.perm.id,answers}).catch(()=>({ok:false,err:'offline'}));
+  const r=await api('/api/perm/answer',{id:a.perm.id,answers,anon:anonOn()}).catch(()=>({ok:false,err:'offline'}));
   toast(r.ok?'Answered, the agent continues':'Failed: '+(r.err||'unknown'),!r.ok);
   refresh();
 }
@@ -250,7 +257,7 @@ async function decidePerm(kind){
   const a=CUR; if(!a||!a.perm)return;
   const t=$('#r-text'), message=kind==='deny'&&t?t.value.trim():'';
   $('#detail').querySelectorAll('[data-perm]').forEach(b=>b.disabled=true);
-  const r=await api('/api/perm/decide',{id:a.perm.id,behavior:kind==='deny'?'deny':'allow',always:kind==='always',message})
+  const r=await api('/api/perm/decide',{id:a.perm.id,behavior:kind==='deny'?'deny':'allow',always:kind==='always',message,anon:anonOn()})
     .catch(()=>({ok:false,err:'offline'}));
   if(r.ok&&message){t.value='';autosize(t)}
   toast(r.ok?(kind==='deny'?'Denied':'Allowed, the agent continues'):'Failed: '+(r.err||'unknown'),!r.ok);
@@ -290,7 +297,7 @@ function paintTyping(){
 async function loadConvo(withSummary){
   const a=CUR; if(!a||!a.transcript)return;
   const key=a.key;
-  const msgs=await api('/api/convo?transcript='+encodeURIComponent(a.transcript)).catch(()=>null);
+  const msgs=await api('/api/convo?transcript='+encodeURIComponent(a.transcript)+(CONVO.raw?'&raw=1':'')).catch(()=>null);
   if(!CUR||CUR.key!==key||!msgs)return;
   const last=x=>x.length?x[x.length-1].text:null;
   const changed=msgs.length!==CONVO.msgs.length||last(msgs)!==last(CONVO.msgs);
@@ -362,8 +369,8 @@ async function sendReply(){
   const imgs=ATT.r.slice(); ATT.r=[]; renderAtt('r');
   try{
     const r=a.kind==='history'
-      ?await api('/api/history/resume',{sid:a.sessionId,text,model,mode,effort})
-      :await api('/api/reply',{id:a.id,session_id:a.sessionId,text,model,mode,effort});
+      ?await api('/api/history/resume',{sid:a.sessionId,text,model,mode,effort,anon:anonOn()})
+      :await api('/api/reply',{id:a.id,session_id:a.sessionId,text,model,mode,effort,anon:anonOn()});
     // on resume, Claude continues in a new session (the old one is archived): open that one
     if(r.ok&&r.id&&r.id!==a.id&&a.kind!=='history'){
       await refresh(); const n=AGENTS.find(x=>x.id===r.id); if(n)select(n.key)}
@@ -389,6 +396,8 @@ async function act(kind){
     if(kind==='hide')closeDetail(); return refresh();
   }
   if(kind==='attach')return attachProject(a);
+  if(kind==='raw'){CONVO.raw=!CONVO.raw;CONVO.msgs=[];renderDetail(false);
+    toast(CONVO.raw?'As the AI saw it: with placeholders':'With the real values');return loadConvo(false)}
   if(kind==='stop'){
     const r=await api('/api/stop',{id:a.id});
     toast(r.ok?'Stopped':'Could not stop: '+r.err,!r.ok); return refresh();
@@ -416,7 +425,7 @@ function attachProject(a){
   $('#at-c').onclick=()=>d.close();
   $('#at-go').onclick=async()=>{
     const pid=$('#at-p').value, text=$('#at-t').value; d.close(); toast(`Opening ${pid}…`);
-    const r=await api('/api/attach-project',{id:a.id,session_id:a.sessionId,project_id:pid,text}).catch(e=>({ok:false,err:e.message}));
+    const r=await api('/api/attach-project',{id:a.id,session_id:a.sessionId,project_id:pid,text,anon:anonOn()}).catch(e=>({ok:false,err:e.message}));
     toast(r.ok?`It can now touch ${pid}`:'Error: '+(r.err||r.out||''),!r.ok);
     await refresh();
     if(r.ok&&r.id){const n=AGENTS.find(x=>x.id===r.id); if(n)select(n.key)}
@@ -448,7 +457,8 @@ async function submit(e){
   const W=t=>withImages('q',t);  // the task carries the images at the end
   const pid=$('#q-proj').value, model=$('#q-model').value;
   const opt=m=>({model:m,mode:$('#q-mode').value||undefined,effort:$('#q-effort').value||undefined,
-    worktree:$('#q-wt').getAttribute('aria-pressed')==='true',profile:$('#q-profile').value||undefined,...whenOf()});
+    worktree:$('#q-wt').getAttribute('aria-pressed')==='true',profile:$('#q-profile').value||undefined,
+    anon:anonOn(),...whenOf()});
   if(opt().trigger==='at'&&!opt().at)return toast('Pick a date and time',true);
   // if you pick "When" by hand that rules; otherwise, the when the router understands
   const routed=(r,m)=>{const o=opt(m);
@@ -464,12 +474,12 @@ async function submit(e){
         return;
       }
       toast('Thinking…');
-      const r=await api('/api/route',{text,project_id:pid,images:imgs});
+      const r=await api('/api/route',{text,project_id:pid,images:imgs,anon:anonOn()});
       if(await launch(p,W(r.task||text),routed(r,model||META.defaults.model))){q.value='';autosize(q);clearAtt('q')}
       return;
     }
     toast('Thinking…');
-    const r=await api('/api/route',{text,images:imgs});
+    const r=await api('/api/route',{text,images:imgs,anon:anonOn()});
     if(r.intent==='action'){
       const res=await api('/api/action',{action_id:r.action_id});
       const ac=META.actions.find(x=>x.id===r.action_id);
@@ -488,7 +498,7 @@ async function submit(e){
         d.close(); toast('Opening the conversation…');
         const o=opt(model||META.defaults.model);
         const res=await api('/api/ask/continue',{question:text,answer:r.answer,text:t,
-          model:o.model,mode:o.mode,effort:o.effort,profile:o.profile}).catch(()=>({ok:false}));
+          model:o.model,mode:o.mode,effort:o.effort,profile:o.profile,anon:o.anon}).catch(()=>({ok:false}));
         toast(res.ok?'Continues as a conversation':'Error: '+(res.err||res.out||'could not open'),!res.ok);
         await refresh();
         if(res.ok){const a=AGENTS.find(x=>x.id===res.id); if(a)select(a.key)}

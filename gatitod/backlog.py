@@ -30,7 +30,7 @@ TICK_S = 20
 # Launched ones stay for a while (to see which session came out) and are then deleted.
 KEEP_LAUNCHED_H = 24 * 7
 EDITABLE = ('task', 'project_id', 'model', 'mode', 'effort', 'worktree', 'trigger', 'at', 'repeat',
-            'rank', 'profile')
+            'rank', 'profile', 'anon')
 
 _wake = threading.Event()
 
@@ -62,6 +62,8 @@ def _clean(f: dict, base: dict | None = None) -> tuple[dict | None, str | None]:
     if d.get('effort') not in core.EFFORTS:
         d['effort'] = p and p['effort']
     d['worktree'] = bool(d.get('worktree') if 'worktree' in f or base else p and p['worktree'])
+    # anonymized: it is stored with the real values and masked when it is launched (mask.py)
+    d['anon'] = bool(d.get('anon'))
     # position in the queue (the web UI changes it on drag); by default, order of arrival
     d['rank'] = d['rank'] if isinstance(d.get('rank'), (int, float)) else None
     if d.get('trigger') not in TRIGGERS:
@@ -160,8 +162,11 @@ def _launch(item_id: str) -> dict:
 
     proj = core.get_project(job['project_id'])
     if proj:
-        res = core.launch_agent(proj['path'], job['task'], job['model'],
-                                f"{proj['id']}: {job['task'][:40]}",
+        task, name = job['task'], f"{proj['id']}: {job['task'][:40]}"
+        if job.get('anon'):
+            import mask
+            task, name = mask.mask_message(task), mask.mask(name)['text']
+        res = core.launch_agent(proj['path'], task, job['model'], name,
                                 job['mode'], job['effort'], job.get('worktree', False),
                                 job.get('profile'))
     else:

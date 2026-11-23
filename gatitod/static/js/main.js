@@ -129,6 +129,7 @@ $('#q-proj-manage').onclick=manageProjects;
 $('#q-repeat').innerHTML=repeatOpts('');
 const wt=$('#q-wt'); wt.setAttribute('aria-pressed',stored('gatito-q-wt')==='1'?'true':'false');
 function setWt(on){wt.setAttribute('aria-pressed',on);store('gatito-q-wt',on?'1':null)}
+paintAnon();   // anonymize switch (mask.js): its state lives in this browser
 wt.onclick=()=>{const on=wt.getAttribute('aria-pressed')!=='true'; setWt(on);
   toast(on?'It will launch in an isolated worktree':'It will launch in the project folder')};
 $('#q-when').onchange=()=>{
