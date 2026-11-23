@@ -1,0 +1,244 @@
+#!/usr/bin/env python3
+"""gatito notebooks: the persistent state of long-running work (~/gatito/notebooks).
+
+    notebook list                                   notebooks and their counts
+    notebook context <notebook> [<folder>]         compact summary to pick up where you left off (start here)
+    notebook show <notebook> [<folder>] [--all]     tree with the type and status of each note
+    notebook create "Title" [--summary …] [--repo gatito …] [--tags a,b]
+    notebook folder <notebook> <relpath> [--title …] [--summary …]
+    notebook note <notebook> <folder> "Title" --kind explanation [--summary …] [--tags a,b]
+    notebook attach <notebook> <folder> file… [--sub diagrams]
+    notebook touch <file.md>…                      sets `updated` and records this session
+    notebook review [<notebook>]                     missing metadata and notes that are too large
+    notebook search "text" [--in <notebook>]
+    notebook kinds                                   valid types and statuses
+
+`note` creates the file with its metadata and a template for its type, and prints the
+path: then write the content with Edit/Write. Inside a Claude Code session it records
+the conversation id in `sessions` (CLAUDE_CODE_SESSION_ID variable). Notes follow the
+language of the notebook they belong to.
+"""
+import argparse
+import os
+import sys
+from pathlib import Path
+
+if sys.version_info < (3, 9):
+    sys.exit('gatito needs Python 3.9 or newer')
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / 'gatitod'))
+import notebooks as C  # noqa: E402
+
+SESSION = os.environ.get('CLAUDE_CODE_SESSION_ID') or None
+
+
+def _tags(s):
+    return [t.strip().lstrip('#') for t in (s or '').split(',') if t.strip()]
+
+
+def _nb(nb):
+    if not C.notebook_dir(nb):
+        hay = ', '.join(c['id'] for c in C.list_all()) or 'none'
+        sys.exit(f'Notebook "{nb}" does not exist. Available: {hay}')
+    return nb
+
+
+def listing(_):
+    cs = C.list_all()
+    if not cs:
+        print(f'No notebooks yet ({C.BASE}). Create one with: notebook create "Title"')
+    for c in cs:
+        print(f'{c["id"]:28} {c["notes"]:>3} notes  {c["tasks_open"]:>3} open tasks  '
+              f'{c["updated"]}  {c["title"]} — {c["summary"]}')
+
+
+def context(a):
+    nb = _nb(a.notebook)
+    t = C.context(nb, a.folder or '', a.max)
+    if t is None:
+        sys.exit(f'Folder "{a.folder}" does not exist in {nb}')
+    print(t)
+
+
+def ver(a):
+    nb = _nb(a.notebook)
+    c = C.notebook(nb)
+    print(f'{c["title"]}  ({C.BASE / nb})')
+    if c['repos']:
+        print(f'repos: {", ".join(c["repos"])}')
+    lines = [0]
+
+    def count(n):
+        return sum(count(h) if 'children' in h else 1 for h in n['children'])
+
+    def draw(n, indent=''):
+        for h in n['children']:
+            if lines[0] >= a.max:
+                return
+            lines[0] += 1
+            if 'children' in h:
+                i = h.get('index') or {}
+                if h['name'] in C.FOLDED_FOLDERS and not a.all:
+                    print(f'{indent}{h["name"]}/  ({count(h)} files; collapsed, use --all to see it)')
+                    continue
+                print(f'{indent}{h["name"]}/' + (f'  [{i.get("status", "")}] {i.get("title", "")}' if i else ''))
+                draw(h, indent + '  ')
+            elif 'note' in h:
+                i = h['note']
+                t = f'  ☐{i["pending"]}' if i['pending'] else ''
+                print(f'{indent}{h["name"]:40} {i["kind"]:11} {i["status"]:9} {i["title"]}{t}')
+            else:
+                print(f'{indent}{h["name"]}')
+
+    def search_node(n, relpath):
+        if n['relpath'] == relpath:
+            return n
+        for h in n['children']:
+            if 'children' in h and (relpath == h['relpath'] or relpath.startswith(h['relpath'] + '/')):
+                return search_node(h, relpath)
+        return None
+    root = search_node(c['tree'], (a.folder or '').strip('/')) if a.folder else c['tree']
+    if not root:
+        sys.exit(f'Folder "{a.folder}" does not exist in {nb}')
+    draw(root)
+    if lines[0] >= a.max:
+        print(f'… cut at {a.max} lines: narrow down with a folder (notebook show {nb} <folder>) or use --max')
+
+
+def create(a):
+    try:
+        r = C.create(a.title, a.summary or '', a.repo or [], _tags(a.tags), a.id)
+    except ValueError as e:
+        sys.exit(str(e))
+    print(f'Notebook "{r["id"]}" at {r["relpath"]} (notebook.md and status.md). Fill in the goal in notebook.md.')
+
+
+def folder(a):
+    try:
+        r = C.create_folder(_nb(a.notebook), a.relpath, a.title or '', a.summary or '')
+    except ValueError as e:
+        sys.exit(str(e))
+    print(C.BASE / a.notebook / r['relpath'] / C.INDEX)
+
+
+def note(a):
+    try:
+        r = C.create_note(_nb(a.notebook), a.folder, a.title, a.kind, a.summary or '', _tags(a.tags),
+                         session=SESSION)
+    except ValueError as e:
+        sys.exit(str(e))
+    print(r['path'])
+    print('Created with its metadata and the type template: write the content with Edit.')
+
+
+def attach(a):
+    try:
+        rel = C.adjuntar(_nb(a.notebook), a.folder, [Path(f).resolve() for f in a.files], a.sub)
+    except ValueError as e:
+        sys.exit(str(e))
+    print('Link them from a note in that folder (relative path):')
+    for r in rel:
+        print(f'![{Path(r).stem}]({r})' if Path(r).suffix.lower() in ('.svg', '.png', '.jpg', '.jpeg', '.webp', '.gif')
+              else f'[{Path(r).name}]({r})')
+
+
+def touch(a):
+    for f in a.files:
+        p = Path(f).resolve()
+        nb = C.of_relpath(str(p))
+        if not nb or not p.is_file():
+            print(f'{f}: is not in a notebook', file=sys.stderr)
+            continue
+        relpath = str(p.relative_to(C.notebook_dir(nb)))
+        text = p.read_text(encoding='utf-8')
+        meta, body = C.split(text)
+        if not meta:
+            meta = {'title': C.info(p)['title'], 'kind': C.info(p)['kind'], 'status': 'draft',
+                    'tags': [], 'summary': '', 'created': C.now()}
+            text = C.join(meta, body)
+        r = C.save(nb, relpath, text, session=SESSION)
+        print(f'{f}: ' + ('updated' if r['ok'] else r['err']))
+
+
+def review(a):
+    nbs = [_nb(a.notebook)] if a.notebook else [c['id'] for c in C.list_all()]
+    problems = 0
+    for nb in nbs:
+        d = C.notebook_dir(nb)
+        for p in sorted(d.rglob('*.md')):
+            rel = p.relative_to(d)
+            if any(x.startswith('.') for x in rel.parts):
+                continue
+            meta, _ = C.split(p.read_text(encoding='utf-8', errors='replace'))
+            failures = []
+            if not meta:
+                failures.append('no metadata (notebook touch <file>)')
+            else:
+                for k in ('title', 'kind', 'status'):
+                    if not meta.get(k):
+                        failures.append(f'missing {k}')
+                if meta.get('kind') and meta['kind'] not in C.KINDS:
+                    failures.append(f'unknown type "{meta["kind"]}"')
+                if meta.get('status') and meta['status'] not in C.STATUSES:
+                    failures.append(f'unknown status "{meta["status"]}"')
+                if not meta.get('summary') and p.name not in (C.COVER, C.STATUS, C.INDEX):
+                    failures.append('no summary')
+            failures += C.size_problems(p)
+            if failures:
+                problems += 1
+                print(f'{nb}/{rel}: ' + '; '.join(failures))
+    print('All good.' if not problems else f'{problems} note(s) to fix.')
+
+
+def search(a):
+    rs = C.search(a.text, a.nb_in, a.max + 1)
+    for r in rs[:a.max]:
+        print(f'{r["notebook"]}/{r["relpath"]}  [{r["kind"]}] {r["title"]} — {r["snippet"][:100]}')
+    if not rs:
+        print('Nothing found.')
+    elif len(rs) > a.max:
+        print('… there are more: refine the search or use --max')
+
+
+def kinds(_):
+    print('Types:')
+    for k, v in C.KINDS.items():
+        print(f'  {k:12} {v}')
+    print('Statuses: ' + ', '.join(C.STATUSES))
+    print('Fields: ' + ', '.join(C.FIELDS))
+
+
+def main():
+    ap = argparse.ArgumentParser(prog='notebook', description=__doc__.split('\n')[0])
+    sub = ap.add_subparsers(dest='cmd', required=True)
+    sub.add_parser('list', help='list notebooks').set_defaults(fn=listing)
+    p = sub.add_parser('context', help='compact summary to pick up where you left off (always start here)')
+    p.add_argument('notebook'); p.add_argument('folder', nargs='?')
+    p.add_argument('--max', type=int, default=C.CONTEXT_MAX, help='maximum characters'); p.set_defaults(fn=context)
+    p = sub.add_parser('show'); p.add_argument('notebook'); p.add_argument('folder', nargs='?')
+    p.add_argument('--max', type=int, default=80, help='maximum lines')
+    p.add_argument('--all', action='store_true', help='expand diagrams/, sessions/ and attachments/')
+    p.set_defaults(fn=ver)
+    p = sub.add_parser('create'); p.add_argument('title'); p.add_argument('--summary')
+    p.add_argument('--repo', action='append', help='projects.json id or path (repeatable)')
+    p.add_argument('--tags'); p.add_argument('--id'); p.set_defaults(fn=create)
+    p = sub.add_parser('folder'); p.add_argument('notebook'); p.add_argument('relpath')
+    p.add_argument('--title'); p.add_argument('--summary'); p.set_defaults(fn=folder)
+    p = sub.add_parser('note'); p.add_argument('notebook'); p.add_argument('folder', help='"" or . for the root')
+    p.add_argument('title'); p.add_argument('--kind', default='note', choices=list(C.KINDS))
+    p.add_argument('--summary'); p.add_argument('--tags'); p.set_defaults(fn=note)
+    p = sub.add_parser('attach'); p.add_argument('notebook'); p.add_argument('folder')
+    p.add_argument('files', nargs='+'); p.add_argument('--sub', default='diagrams'); p.set_defaults(fn=attach)
+    p = sub.add_parser('touch'); p.add_argument('files', nargs='+'); p.set_defaults(fn=touch)
+    p = sub.add_parser('review'); p.add_argument('notebook', nargs='?'); p.set_defaults(fn=review)
+    p = sub.add_parser('search'); p.add_argument('text'); p.add_argument('--in', dest='nb_in', metavar='NOTEBOOK')
+    p.add_argument('--max', type=int, default=15); p.set_defaults(fn=search)
+    sub.add_parser('kinds').set_defaults(fn=kinds)
+    a = ap.parse_args()
+    if getattr(a, 'folder', None) == '.':
+        a.folder = ''
+    a.fn(a)
+
+
+if __name__ == '__main__':
+    main()

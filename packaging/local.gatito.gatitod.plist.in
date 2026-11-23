@@ -1,0 +1,68 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- gatito LaunchAgent template (macOS). bin/install.sh fills it in: launchd does not
+     expand ~ or $HOME, so everything uses absolute paths. Equivalent to gatitod.service. -->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>local.gatito.gatitod</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>@PY@</string>
+    <string>@ROOT@/gatitod/web.py</string>
+    <string>--port</string>
+    <string>8777</string>
+    <string>--host</string>
+    <string>0.0.0.0</string>
+    <string>--local-port</string>
+    <string>8778</string>
+  </array>
+
+  <key>WorkingDirectory</key>
+  <string>@ROOT@</string>
+
+  <!-- launchd sets PATH=/usr/bin:/bin:/usr/sbin:/sbin, so claude and its agents
+       would not find graphviz, gh, node… This is your shell's PATH at install time. -->
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>@PATH@</string>
+    <key>LANG</key>
+    <string>@LANG@</string>
+    <key>PYTHONUTF8</key>
+    <string>1</string>
+    <key>PYTHONUNBUFFERED</key>
+    <string>1</string>
+  </dict>
+
+  <!-- starts at login and restarts if it dies with an error (Restart=on-failure) -->
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <dict>
+    <key>SuccessfulExit</key>
+    <false/>
+  </dict>
+  <key>ThrottleInterval</key>
+  <integer>5</integer>
+
+  <!-- in the graphical session: access to the keychain, where the Claude Code credentials live -->
+  <key>LimitLoadToSessionType</key>
+  <string>Aqua</string>
+  <key>ProcessType</key>
+  <string>Standard</string>
+
+  <!-- launchd gives 256 file descriptors by default; not enough with the phone and several agents -->
+  <key>SoftResourceLimits</key>
+  <dict>
+    <key>NumberOfFiles</key>
+    <integer>4096</integer>
+  </dict>
+
+  <key>StandardOutPath</key>
+  <string>@HOME@/Library/Logs/gatito/gatitod.log</string>
+  <key>StandardErrorPath</key>
+  <string>@HOME@/Library/Logs/gatito/gatitod.log</string>
+</dict>
+</plist>

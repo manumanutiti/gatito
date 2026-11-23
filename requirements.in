@@ -1,0 +1,10 @@
+# What gatito installs in its environment (~/.local/share/gatito/venv) with bin/install.sh.
+# Top-level versions pinned by hand; requirements.lock (bin/gen-lock.sh) pins everything,
+# including what they pull in, with the hashes of each wheel for Linux x86_64 and aarch64 (ARM)
+# and macOS arm64/x86_64, Python 3.9-3.14.
+#
+# cryptography: HTTPS on the home network and notifications (Web Push). 48.0.1 is the last one
+# with a universal2 wheel for macOS (49 only ships arm64: no good for an Intel Mac).
+cryptography==48.0.1
+# diagrams: infra diagrams with official icons (bin/diagram). Needs graphviz.
+diagrams==0.25.1

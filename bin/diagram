@@ -1,0 +1,660 @@
+#!/usr/bin/env python3
+"""Infrastructure diagrams with official icons (AWS, Azure, GCP, K8s, on-prem…).
+
+You write the diagram in Python with the `diagrams` library (mingrammer) and this
+program renders it to SVG with the icons embedded in the file itself, ready to view
+in the gatito chat, in Confluence or anywhere else.
+
+    diagram draw file.py [--theme light|dark] [--png] [--output DIR]
+    diagram icons azure vnet          # search the catalog: what to import
+    diagram icons --list [provider] # categories of each provider
+    diagram catalog                   # rebuilds icons/library and icons/catalog.csv
+
+Icons live locally, in ~/gatito/icons/ (nothing is downloaded when rendering):
+    library/<provider>/<category>/*.png     the library's own (bin/setup-diagrams.sh)
+    custom/*.png|svg|jpg                    yours: from gatito import OwnIcon
+    catalog.csv                             one per row: what to import and where it is
+
+Each rendered diagram is saved as a gatito artifact (state/artifacts/<id>/vN/),
+with its .py source; rendering it again creates a new version.
+
+The library lives in its own environment (bin/setup-diagrams.sh); this program
+re-launches itself inside it.
+"""
+import argparse
+import base64
+import csv
+import json
+import os
+import re
+import runpy
+import shutil
+import sys
+import tempfile
+import types
+from pathlib import Path
+
+if sys.version_info < (3, 9):
+    sys.exit('gatito needs Python 3.9 or newer')
+
+HOME = Path.home()
+GATITO = Path(__file__).resolve().parent.parent
+_DATA = Path(os.environ.get('GATITO_DATA') or HOME / '.local/share/gatito')
+# gatito's environment (bin/install.sh) or, if not there yet, the older one (venv-diagrams)
+VENV = Path(os.environ.get('GATITO_DIAGRAMS_VENV') or next(
+    (v for v in (_DATA / 'venv', _DATA / 'venv-diagrams') if (v / 'bin' / 'python').exists()),
+    _DATA / 'venv'))
+ICONS = GATITO / 'icons'
+LIBRARY = ICONS / 'library'
+CUSTOM = ICONS / 'custom'
+CATALOG = ICONS / 'catalog.csv'
+CUSTOM_IMG = ('.png', '.jpg', '.jpeg', '.svg')
+
+sys.path.insert(0, str(GATITO / 'gatitod'))
+import artifacts  # noqa: E402
+
+try:
+    import diagrams
+except ImportError:
+    py = VENV / 'bin' / 'python'
+    if not py.exists() or os.environ.get('_GATITO_DIAGRAM_REEXEC'):
+        sys.exit('The library is missing: run  bash ~/gatito/bin/setup-diagrams.sh')
+    os.environ['_GATITO_DIAGRAM_REEXEC'] = '1'
+    os.execv(str(py), [str(py), '-I', __file__, *sys.argv[1:]])
+
+from diagrams import Cluster, Diagram, Edge, Node, getcluster, getdiagram  # noqa: E402
+
+SOURCE = 'Helvetica,Arial,sans-serif'
+THEMES = {
+    'light': dict(bg='#ffffff', text='#232f3e', arrow='#5b6b7c', border='#c5ced8',
+                  principal='#1f6fd1', back='#9aa7b5',
+                  groups=('#f3f7fb', '#eef6ee', '#f4f1fa', '#fdf8ea')),
+    'dark': dict(bg='#1e1e2e', text='#cdd6f4', arrow='#9399b2', border='#45475a',
+                   principal='#89b4fa', back='#6c7086',
+                   groups=('#262637', '#2b2b40', '#313244', '#28303f')),
+}
+
+
+def slug(s: str) -> str:
+    return artifacts.slug(s) if s else 'diagram'
+
+
+# ------------------------------------------------------------------ icons local
+def use_local_icons():
+    """Nodes take their icon from icons/library (if present); otherwise from the package."""
+    original = Node._load_icon
+
+    def local(self):
+        if self._icon_dir and self._icon:
+            rel = Path(self._icon_dir)
+            rel = rel.relative_to('resources') if rel.parts[:1] == ('resources',) else rel
+            p = LIBRARY / rel / self._icon
+            if p.is_file():
+                return str(p)
+        return original(self)
+    Node._load_icon = local
+
+    # from gatito import OwnIcon  →  OwnIcon('label', 'company-logo')  (icons/custom)
+    from diagrams.custom import Custom
+
+    def OwnIcon(label, name, **kw):
+        p = Path(name)
+        if not p.is_absolute():
+            cands = [CUSTOM / name] + [CUSTOM / f'{name}{e}' for e in CUSTOM_IMG]
+            p = next((c for c in cands if c.is_file()), cands[0])
+        if not p.is_file():
+            sys.exit(f'No custom icon "{name}" in {CUSTOM}')
+        return Custom(label, str(p), **kw)
+    mod = types.ModuleType('gatito')
+    mod.OwnIcon = OwnIcon
+    sys.modules['gatito'] = mod
+
+
+# ------------------------------------------------------------------ draw
+def prepare(theme: str, output: Path, base: str, done_items: list, png: bool):
+    """Adjusts the library's defaults: theme, font and where it is saved."""
+    t = THEMES[theme]
+    Diagram._default_graph_attrs.update({
+        'bgcolor': t['bg'], 'fontcolor': t['text'], 'fontname': SOURCE, 'fontsize': '20',
+        'pad': '0.6', 'nodesep': '0.7', 'ranksep': '0.9', 'labelloc': 't'})
+    Diagram._default_node_attrs.update({'fontcolor': t['text'], 'fontname': SOURCE, 'fontsize': '12',
+                                        'width': '1.2', 'height': '1.2'})
+    Diagram._default_edge_attrs.update({'color': t['arrow'], 'fontcolor': t['text'],
+                                        'fontname': SOURCE, 'fontsize': '11'})
+    Edge._default_edge_attrs.update({'fontcolor': t['text'], 'fontname': SOURCE,
+                                     'fontsize': '11'})   # Edge(label=…) labels
+    Cluster._default_graph_attrs.update({'fontcolor': t['text'], 'fontname': SOURCE,
+                                         'fontsize': '13', 'pencolor': t['border']})
+    Cluster._Cluster__bgcolors = t['groups']
+
+    original = Diagram.__init__
+
+    def init(self, name='', filename='', *a, **kw):
+        stem = slug(Path(filename).name if filename else (name or base))
+        if stem in {Path(h['dest']).stem for h in done_items}:
+            stem += f'-{len(done_items) + 1}'
+        dest = output / stem
+        done_items.append({'dest': str(dest), 'quality': None, 'name': name or base})
+        kw['outformat'] = 'svg'
+        kw['show'] = False
+        original(self, name, str(dest), *a, **kw)
+        # orthogonal (the default): labels go as xlabel, which graphviz places next to
+        # the already-drawn line; with label in ortho it leaves them far from their arrow
+        self.dot.graph_attr['forcelabels'] = 'true'
+        self.dot.graph_attr['newrank'] = 'true'
+        self._grid = []
+    Diagram.__init__ = init
+
+    # Grid (an archify idea: placement decides whether lines come out straight):
+    # AKS('aks', col=2, row=1). Without col/row, graphviz decides as usual.
+    node_init = Node.__init__
+
+    def node_with_room(self, label='', *, nodeid=None, **attrs):
+        col, row = attrs.pop('col', None), attrs.pop('row', None)
+        d = getdiagram()
+        if nodeid is None and d is not None:
+            # stable ids (not uuid): the same diagram gives the same SVG and creates no version
+            d._n_nodes = getattr(d, '_n_nodes', 0) + 1
+            nodeid = f'n{d._n_nodes}'
+        node_init(self, label, nodeid=nodeid, **attrs)
+        if d is not None and (col is not None or row is not None):
+            c = getcluster()
+            d._grid.append((self.nodeid, col, row, c.dot.name if c else None))
+    Node.__init__ = node_with_room
+
+    # Arrow roles (an archify idea): the main path drives placement and goes straight;
+    # a return arrow is placed as if it went forward (doesn't break reading order) and
+    # is drawn with the arrowhead in the right place.
+    roles = {
+        'principal': {'penwidth': '2.2', 'color': t['principal'], 'weight': '10'},
+        'secondary': {'weight': '1'},
+        'back': {'color': t['back'], 'weight': '1'},
+    }
+    rotate = {'forward': 'back', 'back': 'forward'}
+
+    def connect_con_rol(self, node, node2, edge):
+        attrs = dict(edge.attrs)   # copy: one Edge may serve several arrows
+        rol = attrs.pop('rol', None)
+        a, b = node.nodeid, node2.nodeid
+        if rol:
+            if rol not in roles:
+                sys.exit(f'unknown arrow role: {rol} (use {", ".join(roles)})')
+            by_hand = attrs.get('color') not in (None, '', Edge._default_edge_attrs.get('color'))
+            for k, v in roles[rol].items():
+                if k == 'color' and by_hand:
+                    continue   # a hand-set color wins
+                attrs[k] = v
+            if rol == 'back':
+                a, b = b, a
+                attrs['dir'] = rotate.get(attrs.get('dir', 'forward'), attrs.get('dir'))
+            elif rol == 'principal':   # same group: graphviz aligns and straightens
+                self.dot.node(a, group='principal')
+                self.dot.node(b, group='principal')
+        if self.dot.graph_attr.get('splines') == 'ortho' and attrs.get('label'):
+            attrs['xlabel'] = attrs.pop('label')
+        self.dot.edge(a, b, **attrs)
+    Diagram.connect = connect_con_rol
+
+    render = Diagram.render
+
+    def render_and_measure(self):
+        done = next(h for h in done_items if h['dest'] == self.filename)
+        apply_grid(self)
+        if os.environ.get('_DIAGRAM_DOT'):
+            Path(self.filename + '.dot').write_text(self.dot.source, encoding='utf-8')
+        try:
+            done['quality'] = measure(json.loads(self.dot.pipe(format='json', quiet=True)))
+        except Exception as e:   # measuring must never prevent drawing
+            done['quality'] = {'error': f'{type(e).__name__}: {e}'}
+        if png:   # the library deletes the .dot when done: the PNG is produced before the SVG
+            self.dot.graph_attr['dpi'] = '160'
+            self.dot.render(format='png', view=False, quiet=True)
+            del self.dot.graph_attr['dpi']
+        render(self)
+    Diagram.render = render_and_measure
+
+
+def apply_grid(d):
+    """col/row → dot constraints. In LR each column is a rank (rank=same) and
+    rows are ordered within it; in TB, the other way round. Invisible edges fix the order."""
+    rooms = [s for s in d._grid if s[1] is not None or s[2] is not None]
+    if not rooms:
+        return
+    horizontal = d.dot.graph_attr.get('rankdir', 'LR') in ('LR', 'RL')
+    rank = {nid: (col if horizontal else row) for nid, col, row, _ in rooms}
+    order = {nid: (row if horizontal else col) for nid, col, row, _ in rooms}
+    group = {nid: g for nid, _, _, g in rooms}
+    invis = {'style': 'invis', 'arrowhead': 'none'}
+
+    # Full grid: each empty cell gets an invisible gap the size of an icon; this way
+    # every column and row is complete and dot respects the order.
+    cells = {}
+    for nid in rank:
+        if rank[nid] is not None and order[nid] is not None:
+            cells[(rank[nid], order[nid])] = nid
+    rs = sorted({r for r, _ in cells})
+    os_ = sorted({o for _, o in cells})
+    real_cells = dict(cells)
+
+    def gap_group(r, o):
+        """A gap surrounded by nodes of the same Cluster goes inside it; otherwise dot
+        pulls it out of the group and misplaces the whole row."""
+        for neighbors in (([real_cells.get((r, x)) for x in os_ if x < o], [real_cells.get((r, x)) for x in os_ if x > o]),
+                        ([real_cells.get((x, o)) for x in rs if x < r], [real_cells.get((x, o)) for x in rs if x > r])):
+            before = [group[n] for n in neighbors[0] if n]
+            after = [group[n] for n in neighbors[1] if n]
+            if before and after and before[-1] and before[-1] == after[0]:
+                return before[-1]
+        return None
+
+    gaps_in: dict = {}
+    for r in rs:
+        for o in os_:
+            if (r, o) not in cells:
+                gap = f'_gap_{r}_{o}'.replace('-', 'm').replace('.', '_')
+                attrs = (f'label="" style=invis shape=box fixedsize=true '
+                         f'width={d.dot.node_attr.get("width", "1.2")} '
+                         f'height={d.dot.node_attr.get("height", "1.2")}')
+                g = gap_group(r, o)
+                if g:
+                    gaps_in.setdefault(g, []).append(f'\t\t{gap} [{attrs}]\n')
+                else:
+                    d.dot.body.append(f'\t{gap} [{attrs}]\n')
+                cells[(r, o)] = gap
+    # put the gaps inside the text of their Cluster's subgraph (already dumped to the parent)
+    for g, lines in gaps_in.items():
+        for i, line in enumerate(d.dot.body):
+            if line.lstrip().startswith('subgraph') and (f'"{g}"' in line or f' {g} ' in line):
+                d.dot.body[i + 1:i + 1] = lines
+                break
+        else:
+            d.dot.body.extend(lines)
+
+    # each rank (column in LR) on the same level, ordered by rows
+    for r in rs:
+        col = [cells[(r, o)] for o in os_]
+        d.dot.body.append('\t{rank=same; ' + ' '.join(f'"{i}";' for i in col) + '}\n')
+        for a, b in zip(col, col[1:]):
+            d.dot.edge(a, b, **invis)
+    # each row, straight from one rank to the next
+    for o in os_:
+        row = [cells[(r, o)] for r in rs]
+        for i in row:
+            d.dot.node(i, group=f'row{o}')
+        for a, b in zip(row, row[1:]):
+            d.dot.edge(a, b, weight='10', **invis)
+
+    # nodes with only col (or only row): at least in their rank
+    loose: dict = {}
+    for nid, r in rank.items():
+        if r is not None and order[nid] is None:
+            loose.setdefault(r, []).append(nid)
+    for r, ids in loose.items():
+        anchor = [cells[(r, o)] for o in os_ if (r, o) in cells][:1]
+        d.dot.body.append('{rank=same; ' + ' '.join(f'"{i}";' for i in ids + anchor) + '}')
+
+
+# ------------------------------------------------------------------ quality
+# Like archify's route checking: arrow crossings, arrows passing through someone
+# else's icon and labels on top of icons. On graphviz's actual layout.
+def _bezier(pts, steps=12):
+    out = [pts[0]]
+    for i in range(0, len(pts) - 3, 3):
+        p0, p1, p2, p3 = pts[i:i + 4]
+        for k in range(1, steps + 1):
+            u = k / steps
+            a, b, c, d = (1 - u) ** 3, 3 * u * (1 - u) ** 2, 3 * u * u * (1 - u), u ** 3
+            out.append((a * p0[0] + b * p1[0] + c * p2[0] + d * p3[0],
+                        a * p0[1] + b * p1[1] + c * p2[1] + d * p3[1]))
+    return out
+
+
+def _cruzan(p, q, r, s):
+    def orient(a, b, c):
+        v = (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0])
+        return 0 if abs(v) < 1e-6 else (1 if v > 0 else -1)
+    return (orient(p, q, r) * orient(p, q, s) < 0) and (orient(r, s, p) * orient(r, s, q) < 0)
+
+
+def _segment_in_box(a, b, box):
+    x0, y0, x1, y1 = box
+    for k in range(9):   # sampling: enough at this scale
+        u = k / 8
+        x, y = a[0] + (b[0] - a[0]) * u, a[1] + (b[1] - a[1]) * u
+        if x0 < x < x1 and y0 < y < y1:
+            return True
+    return False
+
+
+def measure(g):
+    nodes = {}
+    for o in g.get('objects', []):
+        if 'pos' in o and 'width' in o:
+            x, y = map(float, o['pos'].split(','))
+            w, h = float(o['width']) * 72, float(o['height']) * 72
+            m = 8   # margin: grazing the box edge doesn't count
+            nodes[o['_gvid']] = {'name': (o.get('label') or o['name']).replace('\\n', ' ').replace('\n', ' ').strip(),
+                                 'box': (x - w / 2 + m, y - h / 2 + m, x + w / 2 - m, y + h / 2 - m),
+                                 'whole': (x - w / 2, y - h / 2, x + w / 2, y + h / 2)}
+    arrows = []
+    for e in g.get('edges', []):
+        stroke = []
+        for op in e.get('_draw_', []):
+            if op.get('op') in ('b', 'B') and op.get('points'):
+                stroke = _bezier([tuple(p) for p in op['points']])
+        if len(stroke) < 2:
+            continue
+        ini, fin = (e['head'], e['tail']) if e.get('dir') == 'back' else (e['tail'], e['head'])
+        name = f"{nodes.get(ini, {}).get('name', '?')} → {nodes.get(fin, {}).get('name', '?')}"
+        caption = None
+        lp = e.get('xlp') or e.get('lp')
+        text = e.get('xlabel') or e.get('label') or ''
+        if lp and text:
+            x, y = map(float, lp.split(','))
+            fs = float(e.get('fontsize', 11))
+            w, h = len(text) * fs * 0.55, fs * 1.2
+            caption = (text, (x - w / 2, y - h / 2, x + w / 2, y + h / 2))
+        arrows.append({'ext': {e['tail'], e['head']}, 'stroke': stroke, 'name': name, 'caption': caption})
+
+    # group (Cluster) titles: a line over them makes them unreadable
+    titles = []
+    for o in g.get('objects', []):
+        if 'bb' in o and o.get('lp') and o.get('label') and o.get('name', '').startswith('cluster'):
+            x, y = map(float, o['lp'].split(','))
+            fs = float(o.get('fontsize', 13))
+            w, h = len(o['label']) * fs * 0.55, fs * 1.2
+            titles.append((o['label'], (x - w / 2, y - h / 2, x + w / 2, y + h / 2)))
+
+    def segs(f):
+        return list(zip(f['stroke'], f['stroke'][1:]))
+
+    def pisa(f, box):
+        return any(_segment_in_box(p, q, box) for p, q in segs(f))
+
+    crossings, cross, covered, overlapping, over_titles = [], [], [], [], []
+    for i, a in enumerate(arrows):
+        for b in arrows[i + 1:]:
+            if _span_common(segs(a), segs(b)) > 40:
+                overlapping.append(f"{a['name']}  and  {b['name']} overlap each other")
+            if a['ext'] & b['ext']:
+                continue   # they share an endpoint: they meet, they don't cross
+            if any(_cruzan(p, q, r, s) for p, q in segs(a) for r, s in segs(b)):
+                crossings.append(f"{a['name']}  ×  {b['name']}")
+        for gid, n in nodes.items():
+            if gid in a['ext']:
+                continue
+            if pisa(a, n['box']):
+                cross.append(f"{a['name']} passes over \"{n['name']}\"")
+            if a['caption']:
+                x0, y0, x1, y1 = a['caption'][1]
+                c = n['whole']
+                if x0 < c[2] and c[0] < x1 and y0 < c[3] and c[1] < y1:
+                    covered.append(f"the label \"{a['caption'][0]}\" ({a['name']}) covers \"{n['name']}\"")
+        if a['caption']:
+            for b in arrows:
+                if b is not a and pisa(b, a['caption'][1]):
+                    covered.append(f"the arrow {b['name']} passes through the label \"{a['caption'][0]}\"")
+        for text, box in titles:
+            if pisa(a, box):
+                over_titles.append(f"{a['name']} passes through the title \"{text}\"")
+    return {'crossings': crossings, 'cross': cross, 'overlapping': overlapping,
+            'covered': covered, 'over_titles': over_titles}
+
+
+def _span_common(sa, sb, tol=7.0):
+    """Length two arrows run together (parallel, nearly overlapping stretches)."""
+    total = 0.0
+    for (p, q) in sa:
+        horiz = abs(p[1] - q[1]) < 0.5
+        vert = abs(p[0] - q[0]) < 0.5
+        if not (horiz or vert):
+            continue
+        for (r, s) in sb:
+            if horiz and abs(r[1] - s[1]) < 0.5 and abs(p[1] - r[1]) < tol:
+                lo = max(min(p[0], q[0]), min(r[0], s[0]))
+                hi = min(max(p[0], q[0]), max(r[0], s[0]))
+                total += max(0.0, hi - lo)
+            elif vert and abs(r[0] - s[0]) < 0.5 and abs(p[0] - r[0]) < tol:
+                lo = max(min(p[1], q[1]), min(r[1], s[1]))
+                hi = min(max(p[1], q[1]), max(r[1], s[1]))
+                total += max(0.0, hi - lo)
+    return total
+
+
+def defects(quality: dict) -> int:
+    return sum(len(v) for k, v in quality.items() if isinstance(v, list))
+
+
+def report(quality: dict) -> list[str]:
+    if 'error' in quality:
+        return [f'Quality: could not measure ({quality["error"]})']
+    lines = []
+    if not defects(quality):
+        return ['Quality: clean (no crossings, no arrows over icons, titles or labels, '
+                'no arrow on top of another).']
+    c = quality
+    lines.append(f'Quality: {len(c["crossings"])} crossings, {len(c["overlapping"])} overlapping arrows, '
+                  f'{len(c["cross"])} over icons, {len(c["over_titles"])} over group titles, '
+                  f'{len(c["covered"])} obstructed labels.')
+    for key in ('cross', 'overlapping', 'crossings', 'over_titles', 'covered'):
+        for x in dict.fromkeys(c[key][:8]):
+            lines.append(f'  - {x}')
+    lines.append('  Fix: rol="back" on arrows that go back, rol="principal" on the '
+                  'path being explained, reorder the nodes or change direction (see the skill).')
+    return lines
+
+
+def embed_icons(svg: Path):
+    """Graphviz links icons by path: they are embedded so the SVG travels on its own."""
+    cache = {}
+
+    def inside(m):
+        relpath = m.group(2)
+        if relpath.startswith('data:'):
+            return m.group(0)
+        if relpath not in cache:
+            p = Path(relpath)
+            kind = {'.png': 'image/png', '.svg': 'image/svg+xml', '.jpg': 'image/jpeg',
+                    '.jpeg': 'image/jpeg'}.get(p.suffix.lower())
+            if not kind or not p.is_file():
+                return m.group(0)
+            cache[relpath] = f'data:{kind};base64,' + base64.b64encode(p.read_bytes()).decode()
+        return f'{m.group(1)}="{cache[relpath]}"'
+    text = svg.read_text(encoding='utf-8')
+    text = re.sub(r'((?:xlink:)?href)="([^"]+)"', inside, text)
+    svg.write_text(text, encoding='utf-8')
+
+
+def draw(args):
+    file = Path(args.file).resolve()
+    if not file.is_file():
+        sys.exit(f'{file} does not exist')
+    origin = os.getcwd()
+    if args.output:   # to a loose folder, without saving it as an artifact
+        output = Path(args.output).expanduser().resolve()
+        output.mkdir(parents=True, exist_ok=True)
+    else:
+        (artifacts.BASE / '.tmp').mkdir(parents=True, exist_ok=True)
+        output = Path(tempfile.mkdtemp(dir=artifacts.BASE / '.tmp'))
+    if args.dot:
+        os.environ['_DIAGRAM_DOT'] = '1'
+    use_local_icons()
+    done_items: list[dict] = []
+    prepare(args.theme, output, file.stem, done_items, args.png)
+    os.chdir(file.parent)   # for custom icons with a relative path (Custom)
+    try:
+        runpy.run_path(str(file), run_name='__main__')
+    except BaseException:
+        if not args.output:
+            shutil.rmtree(output, ignore_errors=True)
+        raise
+    if not done_items:
+        sys.exit('The file does not create any Diagram(...)')
+    dirty = False
+    for done in done_items:
+        dest = done['dest']
+        svg = Path(dest + '.svg')
+        embed_icons(svg)
+        png = Path(dest + '.png')
+        if not args.output:
+            source = output / f'{svg.stem}.py'
+            shutil.copy2(file, source)
+            m = artifacts.save([svg, source] + ([png] if png.is_file() else []),
+                                   done['name'], aid=svg.stem, principal=svg.name,
+                                   kind='diagram', origin=origin,
+                                   description=f'Infrastructure diagram ({file.name})')
+            svg = Path(m['relpath'])
+            png = svg.with_suffix('.png')
+            print(f'![{m["title"]}]({svg})')
+            print(f'Artifact "{m["id"]}", version {m["version"]} (with its .py source).')
+        else:
+            print(f'![{svg.stem}]({svg})')
+        if args.png:
+            print(f'PNG to paste into documents: {png}')
+        if done['quality'] is not None:
+            for line in report(done['quality']):
+                print(line)
+            dirty |= bool(defects(done['quality']))
+    if not args.output:
+        shutil.rmtree(output, ignore_errors=True)
+    if dirty:
+        sys.exit(3)   # drawn, but with defects: the agent should try to fix it
+
+
+# ------------------------------------------------------------------ icons
+# search aliases: abbreviations and the Spanish words you may type (user input, not code)
+SYNONYMS = {
+    'vnet': 'virtualnetwork', 'lb': 'loadbalanc', 'k8s': 'kubernetes', 'db': 'database',
+    'vm': 'virtualmachine', 'fw': 'firewall', 'gw': 'gateway', 'dns': 'dns', 'kv': 'keyvault',
+    'nsg': 'securitygroup', 'apim': 'apimanagement', 'aks': 'kubernetesservice', 'sql': 'sql',
+    'appgw': 'applicationgateway', 'redis': 'redis', 'bucket': 's3', 'cola': 'queue',
+    'red': 'network', 'almacenamiento': 'storage', 'usuario': 'user', 'cortafuegos': 'firewall',   # Spanish search words
+}
+
+
+FIELDS = ['provider', 'category', 'cls', 'alias', 'import_line', 'file']
+
+
+def _library_classes():
+    """(provider, category, class, [aliases], icon_dir, icon) for each diagrams icon."""
+    import importlib
+    import pkgutil
+    root = Path(diagrams.__file__).parent
+    for prov in sorted(p.name for p in root.iterdir() if p.is_dir() and not p.name.startswith('_')):
+        if prov in ('base', 'custom'):
+            continue
+        for m in pkgutil.iter_modules([str(root / prov)]):
+            mod_name = f'diagrams.{prov}.{m.name}'
+            try:
+                mod = importlib.import_module(mod_name)
+            except Exception:
+                continue
+            names: dict[type, list[str]] = {}
+            for name, obj in vars(mod).items():
+                if (isinstance(obj, type) and issubclass(obj, Node) and not name.startswith('_')
+                        and obj.__module__ == mod_name and getattr(obj, '_icon', None)):
+                    names.setdefault(obj, []).append(name)
+            for cls, ns in names.items():
+                yield (prov, m.name, cls.__name__, [n for n in ns if n != cls.__name__],
+                       cls._icon_dir, cls._icon)
+
+
+def catalog(args=None, quiet=False):
+    """Copies the library icons to icons/library (hard links when possible: they don't
+    take double the space) and writes icons/catalog.csv with them and with those in icons/custom."""
+    package_root = Path(diagrams.__file__).parent.parent
+    CUSTOM.mkdir(parents=True, exist_ok=True)
+    rows, copied = [], 0
+    for prov, cat, cls, alias, icon_dir, icon in _library_classes():
+        src = package_root / icon_dir / icon
+        rel = Path(icon_dir)
+        rel = rel.relative_to('resources') if rel.parts[:1] == ('resources',) else rel
+        dst = LIBRARY / rel / icon
+        if src.is_file() and not dst.is_file():
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                os.link(src, dst)
+            except OSError:
+                shutil.copy2(src, dst)
+            copied += 1
+        rows.append({'provider': prov, 'category': cat, 'cls': cls, 'alias': ' '.join(alias),
+                      'import_line': f'from diagrams.{prov}.{cat} import {cls}',
+                      'file': str(dst.relative_to(ICONS))})
+    for f in sorted(CUSTOM.iterdir()):
+        if f.suffix.lower() in CUSTOM_IMG and f.is_file():
+            rows.append({'provider': 'own', 'category': '', 'cls': f.stem, 'alias': '',
+                          'import_line': f"from gatito import OwnIcon  # OwnIcon('label', '{f.stem}')",
+                          'file': str(f.relative_to(ICONS))})
+    tmp = CATALOG.with_suffix('.tmp')
+    with tmp.open('w', newline='', encoding='utf-8') as fh:
+        w = csv.DictWriter(fh, fieldnames=FIELDS)
+        w.writeheader()
+        w.writerows(rows)
+    tmp.replace(CATALOG)
+    if not quiet:
+        custom = sum(1 for f in rows if f['provider'] == 'own')
+        print(f'{CATALOG}: {len(rows)} icons ({custom} custom); '
+              f'{copied} copied to {LIBRARY}.')
+
+
+def read_catalog() -> list[dict]:
+    new_custom = CUSTOM.is_dir() and CATALOG.is_file() and any(
+        f.stat().st_mtime > CATALOG.stat().st_mtime for f in CUSTOM.iterdir())
+    if not CATALOG.is_file() or new_custom:
+        catalog(quiet=True)
+    with CATALOG.open(encoding='utf-8') as fh:
+        return list(csv.DictReader(fh))
+
+
+def icons(args):
+    rows = read_catalog()
+    if args.list is not None:
+        mods: dict[str, set] = {}
+        for f in rows:
+            mods.setdefault(f['provider'], set()).add(f['category'] or f['cls'])
+        for prov in sorted(mods):
+            if args.list and args.list != prov:
+                continue
+            print(f'{prov}: ' + ', '.join(sorted(mods[prov])))
+        return
+    terms = [t.lower() for t in args.search]
+    if not terms:
+        sys.exit('Tell me what to search for: diagram icons azure firewall')
+    hits = []
+    for f in rows:
+        haystack = ' '.join(f[c] for c in ('provider', 'category', 'cls', 'alias', 'file'))
+        haystack = haystack.lower().replace('-', '').replace('_', '')
+        if all(t in haystack or SYNONYMS.get(t, '\0') in haystack for t in terms):
+            hits.append(f)
+    if not hits:
+        sys.exit('Nothing found. Try fewer words (e.g. "azure gateway").')
+    for f in hits[:args.max]:
+        extra = f'   (aliases: {f["alias"].replace(" ", ", ")})' if f['alias'] else ''
+        print(f'{f["import_line"]}{extra}')
+    if len(hits) > args.max:
+        print(f'… and {len(hits) - args.max} more: refine the search.')
+
+
+def main():
+    ap = argparse.ArgumentParser(prog='diagram', description=__doc__.split('\n')[0])
+    sub = ap.add_subparsers(dest='cmd', required=True)
+    p = sub.add_parser('draw', help='render a .py file that uses diagrams')
+    p.add_argument('file')
+    p.add_argument('--theme', choices=THEMES, default='light')
+    p.add_argument('--png', action='store_true', help='also produce a 160 dpi PNG')
+    p.add_argument('--dot', action='store_true', help='also save the .dot source (debugging)')
+    p.add_argument('--output', help='to this folder, without saving it as an artifact')
+    p.set_defaults(fn=draw)
+    i = sub.add_parser('icons', help='search icons in the catalog: what to import')
+    i.add_argument('search', nargs='*')
+    i.add_argument('--list', nargs='?', const='', help='categories of each provider')
+    i.add_argument('--max', type=int, default=40)
+    i.set_defaults(fn=icons)
+    c = sub.add_parser('catalog', help='copy icons to icons/library and rebuild the catalog')
+    c.set_defaults(fn=catalog)
+    args = ap.parse_args()
+    args.fn(args)
+
+
+if __name__ == '__main__':
+    main()

@@ -1,0 +1,114 @@
+#!/usr/bin/env python3
+"""gatito debugging whiteboard: one-line changes that the web UI draws at once.
+
+    whiteboard symptom "api.internal does not resolve" [--wait "the ingress IP"]
+    whiteboard cause <id> "Text" [ok|fails|suspect|unchecked|deduced] [--note …]       phase 1
+    whiteboard module <id> "Name" [status] [--layer L3] [--before <id>] [--note …]       phase 2
+    whiteboard probe <id> ok|fails|suspect|info "command or question" "what matters"
+            [--where you@bastion] [--output "chunk of output"]
+    whiteboard status <id> ok|fails|suspect|unchecked|deduced ["note"]
+    whiteboard next "command" "why" [--piece <id>] [--who agent|user]
+    whiteboard next --none
+    whiteboard close "cause" ["fix"]
+    whiteboard reopen
+    whiteboard show                                         compact text of the board
+
+A cause or module is a piece (`<id>`: lowercase, digits, hyphens). `probe` sets the
+state of its piece (except `info`) and records where it ran: `agent@<host>` by default,
+`--where you@<host>` when the user ran it. The board belongs to this conversation
+(CLAUDE_CODE_SESSION_ID); `symptom` creates it.
+"""
+import argparse
+import os
+import sys
+from pathlib import Path
+
+if sys.version_info < (3, 9):
+    sys.exit('gatito needs Python 3.9 or newer')
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / 'gatitod'))
+import debug as D  # noqa: E402
+
+SESSION = os.environ.get('CLAUDE_CODE_SESSION_ID') or None
+
+
+def _board(create: bool) -> str:
+    if not SESSION:
+        sys.exit('whiteboard only works inside a Claude Code session (CLAUDE_CODE_SESSION_ID is missing)')
+    pid = D.root(SESSION)
+    if not pid and not create:
+        pid = D.adopt(SESSION)
+        if pid:
+            print(f'(continuing whiteboard {pid[:8]})')
+    return pid or SESSION
+
+
+def main():
+    ap = argparse.ArgumentParser(prog='whiteboard', description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    sub = ap.add_subparsers(dest='op', required=True)
+    s = sub.add_parser('symptom')
+    s.add_argument('text')
+    s.add_argument('--wait', default='')
+    for op in ('cause', 'module'):
+        s = sub.add_parser(op)
+        s.add_argument('id')
+        s.add_argument('name', nargs='?', default='')
+        s.add_argument('status', nargs='?', choices=D.STATUSES)
+        s.add_argument('--note')
+        s.add_argument('--layer')
+        s.add_argument('--before')
+    s = sub.add_parser('probe')
+    s.add_argument('id')
+    s.add_argument('res', choices=D.RESULTS)
+    s.add_argument('cmd')
+    s.add_argument('summary')
+    s.add_argument('--where')
+    s.add_argument('--output', default='')
+    s = sub.add_parser('status')
+    s.add_argument('id')
+    s.add_argument('status', choices=D.STATUSES)
+    s.add_argument('note', nargs='?')
+    s = sub.add_parser('next')
+    s.add_argument('cmd', nargs='?')
+    s.add_argument('why', nargs='?', default='')
+    s.add_argument('--piece')
+    s.add_argument('--who', choices=('agent', 'user'), default='agent')
+    s.add_argument('--none', action='store_true')
+    s = sub.add_parser('close')
+    s.add_argument('cause')
+    s.add_argument('fix', nargs='?', default='')
+    sub.add_parser('reopen')
+    sub.add_parser('show')
+    a = ap.parse_args()
+
+    pid = _board(create=a.op == 'symptom')
+    try:
+        if a.op == 'show':
+            d = D.read(pid)
+            print(D.text(d) if d else 'No whiteboard yet: start with `whiteboard symptom "…"`')
+            return
+        with D.changes(pid, create=a.op == 'symptom') as d:
+            if a.op == 'symptom':
+                D.symptom(d, a.text, a.wait)
+            elif a.op in ('cause', 'module'):
+                D.piece(d, 'usual' if a.op == 'cause' else 'modules', a.id, a.name, a.status,
+                        a.note, a.layer, a.before)
+            elif a.op == 'probe':
+                t = D.probe(d, a.id, a.res, a.cmd, a.summary, a.where, a.output)
+                print(f'#{t["n"]}', end=' ')
+            elif a.op == 'status':
+                D.status(d, a.id, a.status, a.note)
+            elif a.op == 'next':
+                D.next_step(d, None if a.none else a.cmd, a.why, a.piece, a.who)
+            elif a.op == 'close':
+                D.close(d, a.cause, a.fix)
+            elif a.op == 'reopen':
+                D.reopen(d)
+    except D.Error as e:
+        sys.exit(str(e))
+    print('ok')
+
+
+if __name__ == '__main__':
+    main()

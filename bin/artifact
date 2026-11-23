@@ -1,0 +1,72 @@
+#!/usr/bin/env python3
+"""Saves in gatito what you generate for the user: HTML pages, images, reports.
+
+    artifact save page.html --title "Ingress comparison" [--id x] [--desc "…"]
+    artifact save report.md table.csv --title "…" --principal report.md
+    artifact list
+    artifact show <id>
+
+Each `save` with the same title (or --id) creates a new version; earlier ones are
+kept. It prints the line to put in your reply so the gatito chat shows the artifact.
+HTML pages are rendered isolated: no internet or access to gatito, so they must be
+self-contained (CSS and JS inside the file itself).
+"""
+import argparse
+import os
+import sys
+from pathlib import Path
+
+if sys.version_info < (3, 9):
+    sys.exit('gatito needs Python 3.9 or newer')
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / 'gatitod'))
+import artifacts  # noqa: E402
+
+
+def save(a):
+    try:
+        m = artifacts.save([Path(f) for f in a.files], a.title, aid=a.id,
+                               principal=a.principal, description=a.desc or '', kind=a.kind,
+                               origin=os.getcwd())
+    except ValueError as e:
+        sys.exit(f'Could not save: {e}')
+    print(f'![{m["title"]}]({m["relpath"]})')
+    print(f'Artifact "{m["id"]}", version {m["version"]}. Put the line above, on its own, in your reply.')
+
+
+def listing(_):
+    for m in artifacts.list_all():
+        print(f'{m["updated"]}  {m["id"]:40}  v{m["version"]:<3} {m["kind"]:8} {m["title"]}')
+
+
+def ver(a):
+    m = artifacts.read(a.id)
+    if not m:
+        sys.exit('Not found')
+    d = artifacts.BASE / a.id
+    for v in m['versions']:
+        print(f'v{v["v"]}  {v["date"]}  ' + ', '.join(str(d / f'v{v["v"]}' / f) for f in v['files']))
+
+
+def main():
+    ap = argparse.ArgumentParser(prog='artifact', description=__doc__.split('\n')[0])
+    sub = ap.add_subparsers(dest='cmd', required=True)
+    g = sub.add_parser('save', help='save files as an artifact (new version)')
+    g.add_argument('files', nargs='+')
+    g.add_argument('--title', required=True)
+    g.add_argument('--id', help='identifier (defaults to one derived from the title)')
+    g.add_argument('--principal', help='the file to display (defaults to the first)')
+    g.add_argument('--desc', help='a one-sentence description')
+    g.add_argument('--kind', choices=['diagram', 'page', 'image', 'text', 'other'],
+                   help='defaults to the type implied by the main file extension')
+    g.set_defaults(fn=save)
+    sub.add_parser('list', help='saved artifacts').set_defaults(fn=listing)
+    v = sub.add_parser('show', help='versions and files of one artifact')
+    v.add_argument('id')
+    v.set_defaults(fn=ver)
+    a = ap.parse_args()
+    a.fn(a)
+
+
+if __name__ == '__main__':
+    main()

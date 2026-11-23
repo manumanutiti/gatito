@@ -1,0 +1,12 @@
+[
+  {
+    "id": "pin-secondary",
+    "group": "Displays",
+    "label": "Pin secondary display",
+    "type": "gsettings-toggle",
+    "platforms": ["linux"],
+    "schema": "org.gnome.mutter",
+    "key": "workspaces-only-on-primary",
+    "keywords": ["pin display", "pin secondary", "pin secondary display", "fijar pantalla", "fijar secundaria", "pantalla fija"]
+  }
+]

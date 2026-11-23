@@ -1,0 +1,65 @@
+#!/usr/bin/env python3
+"""Patches gatitod/vendor/mermaid.min.js so labels do not render as
+"Unsupported markdown: list".
+
+Mermaid 11 runs each label through marked and can only render text, bold and
+italics; anything else is replaced by "Unsupported markdown: <type>". So a label
+like `A[1. Clone]`, `B[- step]`, `C["# Pods"]`, a URL or some `code` renders as
+that message. The patch makes those cases render as the text the diagram author
+wrote.
+
+After patching, bump the `?v=` util.js uses to load mermaid (vendor has long caching).
+It is idempotent; if mermaid is updated and the expected code is not found, it warns
+and touches nothing. Usage: bin/patch-mermaid [path/to/mermaid.min.js]
+"""
+import pathlib
+import sys
+
+MARK = '/* gatito: markdown in labels patch (bin/patch-mermaid) */\n'
+
+# markdownToHTML (HTML labels, the usual case): renders each token type it does not
+# understand as its original text instead of the error message.
+HTML_BEFORE = ':i.type==="escape"?i.text:`Unsupported markdown: ${i.type}`'
+HTML_AFTER = (
+    ':i.type==="escape"?i.text'
+    # lists: "1. one", "- two"… with each item's content inline
+    ':i.type==="list"?i.items.map((c,k)=>(i.ordered?(i.start===""?1:+i.start)+k+". "'
+    ':c.raw.trim()[0]+" ")+(c.tokens||[]).map(x=>x.type==="text"&&x.tokens'
+    '?x.tokens.map(n).join(""):n(x)).join("")).join("<br/>")'
+    ':i.type==="heading"?"#".repeat(i.depth)+" "+(i.tokens||[]).map(n).join("")'
+    ':i.type==="codespan"?`<code>${i.text}</code>`'
+    ':i.type==="del"?`<del>${(i.tokens||[]).map(n).join("")}</del>`'
+    ':i.type==="br"?"<br/>"'
+    ':i.type==="link"&&i.tokens?i.tokens.map(n).join("")'
+    # anything else (quote, ---, indented code…): the original text, escaped
+    ':String(i.raw||"").replace(/\\n+$/,"").replace(/&/g,"&amp;").replace(/</g,"&lt;")'
+    '.replace(/>/g,"&gt;").replace(/\\n/g,"<br/>")'
+)
+
+# markdownToLines (SVG labels without HTML): there anything that was not a paragraph
+# just vanished; now its original text is rendered.
+LINES_CTX = ':l.type==="html"&&i[a].push({content:l.text,type:"normal"})}),i}function uj('
+LINES_AFTER = (':l.type==="html"?i[a].push({content:l.text,type:"normal"})'
+                  ':l.type!=="space"&&l.raw&&s({type:"text",text:l.raw.replace(/\\n+$/,"")})'
+                  '}),i}function uj(')
+
+
+def main():
+    relpath = pathlib.Path(sys.argv[1] if len(sys.argv) > 1 else
+                        pathlib.Path(__file__).resolve().parent.parent / 'gatitod/vendor/mermaid.min.js')
+    s = relpath.read_text(encoding='utf-8')
+    if s.startswith(MARK):
+        print(f'{relpath}: was already patched')
+        return
+    missing = [n for n, a in (('markdownToHTML', HTML_BEFORE), ('markdownToLines', LINES_CTX))
+              if s.count(a) != 1]
+    if missing:
+        sys.exit(f'{relpath}: cannot find {", ".join(missing)} as expected; '
+                 'review the patch for this mermaid version')
+    s = s.replace(HTML_BEFORE, HTML_AFTER).replace(LINES_CTX, LINES_AFTER)
+    relpath.write_text(MARK + s, encoding='utf-8')
+    print(f'{relpath}: patched')
+
+
+if __name__ == '__main__':
+    main()

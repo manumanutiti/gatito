@@ -1,0 +1,12 @@
+[Unit]
+Description=Gatito - agent coordinator
+After=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 %h/gatito/gatitod/web.py --port 8777 --host 0.0.0.0 --local-port 8778
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=default.target

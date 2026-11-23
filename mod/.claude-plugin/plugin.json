@@ -1,0 +1,6 @@
+{
+  "name": "gatito",
+  "version": "0.1.0",
+  "description": "Connects each Claude Code session to gatito: live status, permissions from your phone, and an inbox",
+  "author": { "name": "gatito" }
+}
