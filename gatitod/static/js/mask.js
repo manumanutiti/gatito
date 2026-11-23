@@ -72,8 +72,9 @@ async function openMask(){
   const d=dialog(`<div class="m-h"><h3>Anonymize</h3>
       <button class="btn ${anonOn()?'primary':'ghost'} m-sw" id="m-sw" type="button">${anonOn()?'On':'Off'} in the chat</button></div>
     <p>With it on, what you send to Claude leaves with placeholders (the same real value always gets the same one) and the
-      conversation is shown to you with the real values. Only what you type is masked: what an agent reads from your
-      files or commands reaches it as it is.</p>
+      conversation is shown to you with the real values. A task launched with it on is an <b>anonymous session</b>: it
+      works on the project as <code>/workspace</code> with tools that mask what it reads and put the real values back in
+      what it writes and runs. In a session started without it, only your messages are masked.</p>
     <details class="m-sec" open><summary>Your list <b id="m-n"></b></summary>
       <div class="m-tools"><button class="btn ghost" id="m-add" type="button">${ICON('plus')}Add</button>
         <button class="btn ghost" id="m-tpl" type="button" title="Adds empty rows for tenants, subscriptions, resource groups, clusters, vaults, repos…">${ICON('plus')}Cloud and DevOps rows</button>

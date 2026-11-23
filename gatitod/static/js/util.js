@@ -67,8 +67,9 @@ function ago(ms){
 }
 function proj(a){
   // in a worktree the cwd is <repo>/.claude/worktrees/<name>: show the repo
-  const c=(a.cwd||'').split('/.claude/worktrees/')[0];
-  return (c.split('/').filter(Boolean).pop()||c)+(a.worktreeBranch?' · worktree':'');
+  // an anonymous session runs in an empty folder: its project is a.anon
+  const c=(a.anon||a.cwd||'').split('/.claude/worktrees/')[0];
+  return (c.split('/').filter(Boolean).pop()||c)+(a.worktreeBranch?' · worktree':'')+(a.anon?' · anonymous':'');
 }
 function home(p){return(p||'').replace(/^\/home\/[^/]+/,'~')}
 function setConn(cls,t){

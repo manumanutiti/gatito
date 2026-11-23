@@ -202,9 +202,35 @@ backlog tasks (each task stores its own switch).
 - **As sent / Real values** in a conversation's header shows exactly what the AI saw.
   **Try it** previews what would leave, or puts the real values back in pasted text.
 
-Only what you type is masked: an agent that reads files or runs commands on your machine
-sees their real contents, and the commands it writes carry the placeholders. It is meant to
-avoid leaking names easily in questions and designs, not as a guarantee.
+### Anonymous sessions
+
+A task launched with the switch on (from the composer, the backlog or "Continue" on a
+question) is an **anonymous session**, so the files it reads do not leak either:
+
+- It runs in an empty folder (`chats/<date>-<task>`), so Claude Code puts neither the project's
+  path, git status, CLAUDE.md nor memory in its context. The project is `/workspace` for the AI.
+- It has no built-in Read, Write, Edit, Grep, Glob or Bash (`--tools`): it works with the
+  `gatito-anon` MCP server (`gatitod/maskmcp.py`: read, glob, grep, edit, write, bash). Each tool
+  puts the real values back in what the agent sends (paths, contents, commands) and masks
+  what comes back. So the AI sees `rg-tenant-alpha-prod` and your disk gets `rg-acme-prod`.
+- read/glob/grep run without asking; edit/write/bash go through the permission mode as usual
+  (from the web UI, with the real values). Writing is limited to the project; reading also
+  to the pasted images. `git push`, PRs and releases are refused, as in the other sessions.
+  A read-only profile leaves only read/glob/grep.
+- With **worktree** gatito creates `<repo>/.claude/worktrees/anon-<date>` (branch
+  `worktree-anon-<date>`) and the session works there.
+- The first message is a warm-up ("ready"): in a session MCP servers connect in parallel with
+  the first turn, so the task goes as the second message, through the gatito mod (or by
+  resuming the session with its anonymous flags).
+- **Open project** in an anonymous session without a project points `/workspace` to it.
+
+Limits: images, and anything the dictionary or the detectors do not recognize, go as they are
+(add those names to your list); `bash` runs without Claude Code's sandbox; your system user
+name can show in outputs like `ls -l`. Resume an anonymous session only from gatito: from a
+terminal, `claude --resume` would bring the built-in tools back.
+
+In a session started without the switch, turning it on only masks your messages: an agent
+that reads files there sees their real contents.
 
 ## Panels
 

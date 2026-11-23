@@ -26,19 +26,25 @@ your machine, it sees their real contents.
 """
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import json
+import os
 import random
 import re
 import secrets
 import threading
 from pathlib import Path
 
-import store
-from core import STATE
+from contextlib import contextmanager
 
+import hostinfo
+import store
+
+# not from core: the anonymous sessions' MCP server (maskmcp.py) imports this module too
+STATE = Path(os.environ.get('GATITO_STATE') or hostinfo.ROOT / 'state')
 DIR = STATE / 'mask'
-DIR.mkdir(exist_ok=True)
+DIR.mkdir(parents=True, exist_ok=True)
 CONFIG = DIR / 'config.json'
 VAULT = DIR / 'vault.json'
 
@@ -104,6 +110,18 @@ NOTE = ('[gatito: some names, ids, IPs and secrets in this conversation are cons
 
 _lock = threading.RLock()
 _cache: dict = {}
+
+
+@contextmanager
+def _xlock():
+    """Threads of this process and the other processes (gatitod and the MCP servers of the
+    anonymous sessions): two of them learning at once could give one placeholder to two values."""
+    with _lock, open(DIR / '.lock', 'a') as f:
+        fcntl.flock(f, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(f, fcntl.LOCK_UN)
 
 
 # ------------------------------------------------------------------ state
@@ -183,7 +201,7 @@ def _clean_entries(entries) -> tuple[list[dict], list[str]]:
 
 
 def save(fields: dict) -> dict:
-    with _lock:
+    with _xlock():
         c = config()
         if 'entries' in fields:
             entries, errs = _clean_entries(fields['entries'])
@@ -202,7 +220,7 @@ def save(fields: dict) -> dict:
 def forget(real: str | None = None) -> dict:
     """Forget what the detectors learned (one value, or all). Chats that used it can no
     longer be shown with the real value."""
-    with _lock:
+    with _xlock():
         v = vault()
         if real is None:
             v = {'map': {}, 'n': {}}
@@ -430,7 +448,7 @@ def mask(text: str, learn: bool = True, entries: list | None = None) -> dict:
     `entries` replaces the saved list (a preview of the list being edited)."""
     if not text:
         return {'text': text, 'found': []}
-    with _lock:
+    with _xlock():
         c, v = config(), vault()
         if entries is not None:
             entries, errs = _clean_entries(entries)

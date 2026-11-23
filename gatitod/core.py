@@ -10,6 +10,7 @@ import json
 import os
 import re
 import subprocess
+import sys
 import threading
 import time
 from datetime import datetime
@@ -158,12 +159,68 @@ def profile_contribution(profile: dict) -> dict:
                            str(BIN_ARTIFACT), str(BIN_DIAGRAM), str(BIN_WHITEBOARD))
 
 
+# ------------------------------------------------------- anonymous sessions
+# With "Anonymize" on, a task does not run in the project folder with the built-in tools:
+# it runs in an empty folder and works on the project through gatitod/maskmcp.py, which
+# masks what the agent reads and puts the real values back in what it writes and runs.
+# So neither the files nor the git status, CLAUDE.md or path of the project reach the AI.
+MASK_MCP = ROOT / 'gatitod' / 'maskmcp.py'
+ANON_SESSIONS = STATE / 'anon-sessions.json'   # session -> {'root': real project folder}
+ANON_MCP = 'gatito-anon'
+# built-in tools left: none touches files or the shell
+ANON_BUILTINS = 'AskUserQuestion,WebSearch,WebFetch,TaskCreate,TaskUpdate,TaskList,TaskGet'
+ANON_PROMPT = (
+    'This is an anonymized session. The project is at /workspace and you work on it only with '
+    f'the {ANON_MCP} tools (read, glob, grep, edit, write, bash): there are no other file or shell tools. '
+    'Many names, ids, IPs, e-mails and secrets are consistent pseudonyms (tenant-alpha, rg-bravo, '
+    '00000000-0000-4000-a000-…, masked-secret-3…). Treat them as the real values, write them exactly as '
+    'they appear (same case) in code, commands and answers, and never ask for or guess the real ones: '
+    'the tools translate them. If the gatito-anon tools are not in your tool list yet, they are '
+    'still starting: do not use any other tool to make up for them, just say in one line that '
+    'they are starting and stop (the user will send the message again). '
+    'The user follows this conversation in a web interface that draws diagrams: when a concept is easier '
+    'to understand visually, add a ```mermaid block (short labels; in flowchart put node labels with '
+    'symbols in quotes, in sequenceDiagram do not use quotes).')
+
+
+# In a session (not with -p), MCP servers connect in parallel with the first turn: without
+# this the first message can arrive before the anonymized tools. Not a documented variable
+# of Claude Code: if it stops working, the prompt above tells the agent to stop and wait.
+ANON_ENV = {**os.environ, 'CLAUDE_CODE_MCP_PREWAIT_SERVERS': ANON_MCP}
+
+
+def anon_for(*keys: str | None) -> dict | None:
+    m = store.read(ANON_SESSIONS, {}) or {}
+    return next((m[k] for k in keys if k and isinstance(m.get(k), dict)), None)
+
+
+def remember_anon(info: dict | None, *keys: str | None):
+    if info and any(keys):
+        with store.edit(ANON_SESSIONS, {}) as m:
+            for k in keys:
+                if k:
+                    m[k] = info
+
+
+def _anon_flags(root: str, read_only: bool) -> list[str]:
+    srv = {'command': sys.executable, 'args': [str(MASK_MCP), '--root', root, '--extra', str(UPLOADS),
+                                               *(['--read-only'] if read_only else [])],
+           'env': {'GATITO_STATE': str(STATE), 'GATITO_ROOT': str(ROOT)}}
+    ro = [f'mcp__{ANON_MCP}__{t}' for t in ('read', 'glob', 'grep')]
+    rw = [f'mcp__{ANON_MCP}__{t}' for t in ('edit', 'write', 'bash')]
+    return ['--tools', ANON_BUILTINS, '--strict-mcp-config',
+            '--mcp-config', json.dumps({'mcpServers': {ANON_MCP: srv}}),
+            '--allowedTools', *ro, *(['--disallowedTools', *rw] if read_only else [])]
+
+
 def _agent_flags(mode: str | None = None, effort: str | None = None,
-                 cwd: str | None = None, profile: dict | None = None) -> list[str]:
+                 cwd: str | None = None, profile: dict | None = None,
+                 anon_root: str | None = None) -> list[str]:
     """Flags common to launching and resuming (resuming does not reliably inherit).
     Inside a notebook, also its prompt and access to its repos. With a profile
     (profiles.py), its prompt, its rules and its mode; DENY_TOOLS and SAFETY_PROMPT are
-    always included, and in a read-only profile the mode is dontAsk whatever you choose."""
+    always included, and in a read-only profile the mode is dontAsk whatever you choose.
+    With `anon_root`, an anonymous session on that folder (see ANON_PROMPT)."""
     ap = profile_contribution(profile) if profile else None
     if ap and ap['read_only']:
         mode = 'dontAsk'
@@ -176,6 +233,11 @@ def _agent_flags(mode: str | None = None, effort: str | None = None,
         effort = profile and profile.get('effort')
     if effort in EFFORTS:
         flags += ['--effort', effort]
+    if anon_root:
+        # the profile's rules talk about the built-in tools: here only its prompt and read-only apply
+        prompt = f'{ANON_PROMPT}\n\n{SAFETY_PROMPT}' + (f"\n\n{ap['prompt']}" if ap else '')
+        return flags + ['--append-system-prompt', prompt,
+                        *_anon_flags(anon_root, bool(ap and ap['read_only']))]
     prompt, dirs = f'{DIAGRAM_PROMPT}\n\n{SAFETY_PROMPT}', [str(DIAGRAMS), str(UPLOADS), str(ARTIFACTS), str(NOTEBOOKS)]
     nb = notebooks.of_relpath(cwd)
     if nb:
@@ -450,6 +512,12 @@ def _list_agents(include_done: bool) -> list[dict]:
         a['worktreePath'] = job.get('worktreePath') or (
             a.get('cwd') if '/.claude/worktrees/' in (a.get('cwd') or '') else None)
         a['worktreeBranch'] = job.get('worktreeBranch') or _branch_of(a['worktreePath'])
+        an = anon_for(a.get('id'), a.get('sessionId'))
+        if an and a.get('sessionId') and not anon_for(a['sessionId']):
+            remember_anon(an, a['sessionId'])   # to resume it later from History
+        a['anon'] = an and an['root']           # anonymous session: the project it works on
+        if an and '/.claude/worktrees/' in an['root']:
+            a['worktreeBranch'] = a['worktreeBranch'] or _branch_of(an['root'])
         a['result'] = (job.get('output') or {}).get('result') if isinstance(job.get('output'), dict) else None
         a['updatedAt'] = _iso_ms(job.get('updatedAt')) or a.get('startedAt')
         a['transcript'] = job.get('linkScanPath') or _transcript_path(a)
@@ -621,6 +689,19 @@ def attach_project(agent_id: str, session_id: str, project_id: str, text: str = 
         return {'ok': False, 'err': 'only sessions without a project can open one'}
     if not agent_id:
         return {'ok': False, 'err': 'this session is in a terminal: add the folder there with /add-dir'}
+    anon = anon_for(session_id, agent_id, ag.get('key'))
+    if anon:
+        # anonymous: /workspace now points to the project (its real path is not told to the AI)
+        remember_anon({'root': proj['path']}, session_id, agent_id, ag.get('key'))
+        msg = ('/workspace now points to the project you have to work on (it may have a CLAUDE.md: '
+               'read it if it does). From here on, code work goes there.')
+        subprocess.run([CLAUDE, 'stop', agent_id], capture_output=True, text=True, timeout=20)
+        res = resume_session(session_id, cwd, msg + (f'\n\n{text.strip()}' if text.strip() else ''),
+                             ag.get('model'), ag.get('mode'), ag.get('effort'), ag.get('name'),
+                             keys=(agent_id, ag.get('key')))
+        if res['ok'] and res.get('id') and res['id'] != agent_id and ag.get('key'):
+            set_hidden(ag['key'], True)
+        return res
     f = Path(cwd) / '.claude' / 'settings.local.json'
     f.parent.mkdir(exist_ok=True)
     cfg = _read_json(f, {}) or {}
@@ -654,9 +735,12 @@ def resume_session(session_id: str, cwd: str | None, text: str, model: str | Non
     if info and info.get('profile') == 'debug' and not info.get('whiteboard'):
         # the new session keeps drawing on the same whiteboard (debug.root)
         info = {**info, 'whiteboard': debug.root(session_id, *keys) or session_id}
+    anon = anon_for(session_id, *keys)
+    if anon:
+        keep = False   # the flags are what keeps the built-in tools out: always passed again
     cmd = [CLAUDE, '--bg', '--resume', session_id]
     if not keep:
-        cmd += _agent_flags(mode, effort, cwd, live_profile(info))
+        cmd += _agent_flags(mode, effort, cwd, live_profile(info), anon_root=anon and anon['root'])
         model = valid_model(model)
         if model:
             cmd += ['--model', model]
@@ -664,11 +748,13 @@ def resume_session(session_id: str, cwd: str | None, text: str, model: str | Non
             cmd += ['--name', name]
     # `--disallowedTools` is variadic: `--` keeps it from swallowing the message.
     cmd += ['--', text]
-    r = subprocess.run(cmd, capture_output=True, text=True, timeout=60, cwd=cwd)
+    r = subprocess.run(cmd, capture_output=True, text=True, timeout=60, cwd=cwd,
+                       env=ANON_ENV if anon else None)
     invalidate()
     short = _short_id(r.stdout)
     if r.returncode == 0:
         remember_profile(info, short, session_id)
+        remember_anon(anon, short, session_id)
     return {'ok': r.returncode == 0, 'id': short, 'out': r.stdout.strip(),
             'err': r.stderr.strip()}
 
@@ -699,7 +785,7 @@ def is_scratch(path: str | None) -> bool:
 def launch_agent(path: str | None, task: str, model: str | None = None,
                  name: str | None = None, mode: str | None = None,
                  effort: str | None = None, worktree: bool | None = None,
-                 profile: str | None = None) -> dict:
+                 profile: str | None = None, anon: bool = False) -> dict:
     """Launch a worker in `path`. Returns the short id if all goes well.
 
     With `worktree`, the agent works in an isolated copy of the repo
@@ -707,6 +793,7 @@ def launch_agent(path: str | None, task: str, model: str | None = None,
     can touch the same project without stepping on each other. `claude rm` deletes it if there
     are no unmerged changes. Without `path`, it works in a new folder (no project).
     With `profile` (an id from profiles/), whatever you do not choose takes the profile's value.
+    With `anon`, an anonymous session (see ANON_PROMPT): `task` arrives already masked.
     """
     p = None
     if profile:
@@ -715,6 +802,8 @@ def launch_agent(path: str | None, task: str, model: str | None = None,
             return {'ok': False, 'id': None, 'err': f'profile "{profile}" does not exist (or is not valid)'}
     if worktree is None:
         worktree = bool(p and p['worktree'])
+    if anon:
+        return _launch_anon(path, task, model, name, mode, effort, worktree, p)
     if not path:
         path, worktree = new_scratch(task), False
     if notebooks.of_relpath(path):   # notebooks/ is the autosave repo: no worktrees there
@@ -746,6 +835,91 @@ def launch_agent(path: str | None, task: str, model: str | None = None,
         _log({'ts': time.time(), 'kind': 'launch', 'path': path,
               'task': task, 'model': model, 'mode': mode, 'effort': effort,
               'worktree': worktree, 'profile': p and p['id'], 'id': short})
+    return {'ok': ok, 'id': short, 'out': r.stdout.strip(), 'err': r.stderr.strip()}
+
+
+def _anon_worktree(repo: str) -> tuple[str | None, str | None]:
+    """Isolated copy for an anonymous session (claude --worktree needs the session to run in
+    the repo, and an anonymous one runs in an empty folder): same place and branch naming."""
+    name = 'anon-' + time.strftime('%Y%m%d-%H%M%S')
+    wt = Path(repo) / '.claude' / 'worktrees' / name
+    r = subprocess.run(['git', '-C', repo, 'worktree', 'add', '-b', f'worktree-{name}', str(wt)],
+                       capture_output=True, text=True, timeout=60)
+    return (str(wt), None) if r.returncode == 0 else (None, (r.stderr or r.stdout).strip())
+
+
+ANON_WARMUP = ('Anonymized session starting: your task arrives in the next message. '
+               'Do not use any tool now; reply only "ready".')
+
+
+def _answered(transcript: str | None) -> bool:
+    """The warm-up turn is over: the transcript already has an answer from the assistant."""
+    try:
+        return bool(transcript) and '"type":"assistant"' in Path(transcript).read_text(errors='ignore').replace(' ', '')
+    except OSError:
+        return False
+
+
+def _deliver_anon(short: str, task: str, wait_s: float = 180):
+    """The real task of an anonymous session, once its warm-up turn is over: through the
+    gatito mod if the session has it (same session, no restart). Without the mod it is
+    resumed with the anonymous flags (Claude opens a copy, the original is archived): never
+    without them, a copy without flags could come back with the built-in tools."""
+    end = time.time() + wait_s
+    while time.time() < end:
+        time.sleep(2)
+        a = next((x for x in list_agents(max_age=0) if x.get('id') == short), None)
+        if not a or not a.get('sessionId') or not _answered(a.get('transcript')):
+            continue
+        if a.get('live') == 'idle' and modlink.send(a['sessionId'], task).get('ok'):
+            return
+        if not a.get('live') and a.get('ui') in ('done', 'blocked') and not a.get('perm'):
+            subprocess.run([CLAUDE, 'stop', short], capture_output=True, text=True, timeout=20)
+            res = resume_session(a['sessionId'], a.get('cwd'), task, a.get('model'), a.get('mode'),
+                                 a.get('effort'), a.get('name'), keys=(short, a.get('key')))
+            if res['ok'] and res.get('id') and res['id'] != short:
+                set_hidden(a['key'], True)
+            return
+    _log({'ts': time.time(), 'kind': 'anon-deliver-failed', 'id': short})
+
+
+def _launch_anon(path: str | None, task: str, model: str | None, name: str | None, mode: str | None,
+                 effort: str | None, worktree: bool, p: dict | None) -> dict:
+    """The session runs in a new empty folder (no git status, CLAUDE.md or real path in its
+    context) and reaches the project, presented as /workspace, only through maskmcp.py."""
+    if path and not Path(path).is_dir():
+        return {'ok': False, 'err': f'folder {path} does not exist'}
+    if path and worktree and not notebooks.of_relpath(path):
+        if not is_git_repo(path):
+            return {'ok': False, 'err': f'{path} is not a git repo: cannot isolate it in a worktree'}
+        path, err = _anon_worktree(path)
+        if err:
+            return {'ok': False, 'err': f'could not create the worktree: {err}'}
+    # the folder's name comes from the task, which is already masked
+    cwd = new_scratch(task)
+    root = path or cwd
+    model = valid_model(model) or (p and p['model']) or DEFAULT_MODEL
+    cmd = [CLAUDE, '--bg', '--model', model, *_agent_flags(mode, effort, cwd, p, anon_root=root)]
+    if name:
+        cmd += ['--name', name]
+    # the first turn can start before the MCP server is connected: it is a warm-up, and the
+    # task goes as the second message (_deliver_anon), when the tools are already there
+    cmd += ['--', ANON_WARMUP]
+    r = subprocess.run(cmd, capture_output=True, text=True, cwd=cwd, timeout=90, env=ANON_ENV)
+    short = _short_id(r.stdout)
+    ok = r.returncode == 0 and short is not None
+    invalidate()
+    if ok:
+        threading.Thread(target=_deliver_anon, args=(short, task), daemon=True).start()
+        remember_anon({'root': root}, short)
+        if p:
+            remember_profile(profile_info(p), short)
+        _log({'ts': time.time(), 'kind': 'launch', 'path': root, 'anon': True, 'model': model,
+              'mode': mode, 'effort': effort, 'profile': p and p['id'], 'id': short})
+    elif 'not trusted' in (r.stdout + r.stderr):
+        return {'ok': False, 'id': None, 'out': r.stdout.strip(),
+                'err': f'Claude Code does not trust {CHATS} yet. In a terminal: cd {CHATS} && claude, '
+                       'accept the trust prompt and exit; then try again.'}
     return {'ok': ok, 'id': short, 'out': r.stdout.strip(), 'err': r.stderr.strip()}
 
 

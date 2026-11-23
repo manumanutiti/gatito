@@ -99,6 +99,7 @@ function renderDetail(full){
         ${a.mode?`<span class="x">permissions: ${esc(label('modes',a.mode))}</span>`:''}
         ${a.effort?`<span class="x">effort: ${esc(a.effort)}</span>`:''}
         ${a.worktreeBranch?`<span class="mono x">branch: ${esc(a.worktreeBranch)}</span>`:''}
+        ${a.anon?`<span class="x anon-tag" title="Anonymous session: the AI sees ${esc(home(a.anon))} as /workspace, with placeholders">anonymous · ${esc(home(a.anon))}</span>`:''}
         ${a.tokens?`<span class="x">${Number(a.tokens).toLocaleString('en-GB')} tokens</span>`:''}</div></div>
     <div class="d-actions">${acts.join('')}</div></div>`;
 
@@ -276,7 +277,9 @@ function wireDetail(){
 // "Bash  npm test": the tool and what it does, on one line
 function toolLine(t){
   const what=t.what||(t.text||'').replace(/^\S+\s*/,'');
-  return `<b>${esc(t.tool||String(t.text||'').split(' ')[0])}</b> <span>${esc(home(what))}</span>`;
+  // the anonymous sessions' tools (maskmcp.py) without their MCP prefix
+  const tool=String(t.tool||String(t.text||'').split(' ')[0]).replace(/^mcp__gatito-anon__/,'');
+  return `<b>${esc(tool)}</b> <span>${esc(home(what))}</span>`;
 }
 // while it works: dots at the end of the chat and what it is doing
 function busy(a){return a.live==='working'||(a.kind==='background'&&a.ui==='working')}

@@ -168,7 +168,7 @@ def _launch(item_id: str) -> dict:
             task, name = mask.mask_message(task), mask.mask(name)['text']
         res = core.launch_agent(proj['path'], task, job['model'], name,
                                 job['mode'], job['effort'], job.get('worktree', False),
-                                job.get('profile'))
+                                job.get('profile'), anon=bool(job.get('anon')))
     else:
         res = {'ok': False, 'err': f"project {job['project_id']} no longer exists"}
 

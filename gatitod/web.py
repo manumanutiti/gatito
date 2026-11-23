@@ -270,7 +270,8 @@ def _launch(b):
     # without `path`: no project, in a new folder. Without `worktree`, the profile's
     return core.launch_agent(b.get('path') or None, _out(b, b['task']), b.get('model'),
                              _plain_out(b, b.get('name')), b.get('mode'), b.get('effort'),
-                             bool(b['worktree']) if 'worktree' in b else None, b.get('profile') or None)
+                             bool(b['worktree']) if 'worktree' in b else None, b.get('profile') or None,
+                             anon=bool(b.get('anon')))
 
 
 @api('POST', '/api/ask/continue')
@@ -280,7 +281,8 @@ def _ask_continue(b):
     task = ('We are continuing a conversation that started in gatito.\n\n'
             f'My question: {q}\n\nYour answer: {a}\n\nNow: {b["text"].strip()}')
     return core.launch_agent(None, _out(b, task), b.get('model'), _plain_out(b, f'chat: {q[:40]}'),
-                             b.get('mode'), b.get('effort'), profile=b.get('profile') or None)
+                             b.get('mode'), b.get('effort'), profile=b.get('profile') or None,
+                             anon=bool(b.get('anon')))
 
 
 @api('POST', '/api/reply')
