@@ -9,7 +9,7 @@
     --pink:#f5c2e7; --flamingo:#f2cdcd; --maroon:#eba0ac; --rosewater:#f5e0dc;
     --sans:"Figtree",system-ui,-apple-system,"Segoe UI",sans-serif;
     --mono:ui-monospace,"JetBrains Mono","Fira Code",monospace;
-    --rail:76px; --bar:62px;
+    --rail:60px; --bar:62px;
     --r:10px;
     /* fluid type scale: comfortable on mobile, roomier on large screens */
     --fs-xs:clamp(11.5px, 11px + .2vw, 13px);
@@ -440,27 +440,63 @@
   }
 
   /* =========================================================== shell */
-  .shell{display:grid;grid-template-columns:var(--rail) minmax(0,1fr);height:100vh;height:100dvh}
-  .rail{display:flex;flex-direction:column;align-items:stretch;gap:4px;padding:14px 8px;
-    padding-top:max(14px,env(safe-area-inset-top));background:var(--crust);border-right:1px solid var(--surface0)}
-  .logo{display:grid;place-items:center;height:44px;margin-bottom:10px;color:var(--mauve)}
-  .logo{position:relative}
-  .logo svg{width:30px;height:30px}
+  /* the side bar: icons only, the name of each view comes out on hover with its key; a marker
+     slides to the open view. Auto-hidden (rail-off), it lies outside the page and comes out
+     over it when the pointer touches the left edge. */
+  .shell{display:grid;grid-template-columns:var(--rail) minmax(0,1fr);height:100vh;height:100dvh;
+    transition:grid-template-columns .24s cubic-bezier(.2,.8,.2,1)}
+  .shell>.views{grid-column:2;grid-row:1}
+  .rail{grid-column:1;grid-row:1;position:relative;z-index:30;display:flex;flex-direction:column;align-items:stretch;
+    gap:2px;padding:12px 8px;padding-top:max(12px,env(safe-area-inset-top));background:var(--crust);
+    border-right:1px solid var(--surface0)}
+  .logo{position:relative;display:grid;place-items:center;height:40px;margin-bottom:12px;color:var(--mauve)}
+  .logo svg{width:28px;height:28px}
   .logo .conn{position:absolute;width:7px;height:7px;border-radius:50%;background:var(--dim);
-    transform:translate(14px,12px);box-shadow:0 0 0 2px var(--crust)}
+    transform:translate(13px,11px);box-shadow:0 0 0 2px var(--crust)}
   .logo .conn.on{background:var(--green)}
   .logo .conn.off{background:var(--red)}
-  .tab{position:relative;display:flex;flex-direction:column;align-items:center;gap:3px;padding:9px 2px 7px;
-    border-radius:10px;color:var(--over);text-decoration:none;font-size:12px;font-weight:600}
-  .tab svg.i{width:20px;height:20px}
-  .tab:hover{color:var(--text);background:var(--mantle)}
-  .tab[aria-current="page"]{color:var(--text);background:var(--surface0)}
+  .rail-tabs{position:relative;display:flex;flex-direction:column;gap:2px}
+  .rail-ind{position:absolute;top:0;left:0;right:0;height:44px;border-radius:12px;background:var(--surface0);
+    opacity:0;pointer-events:none;transition:transform .28s cubic-bezier(.2,.8,.2,1),opacity .2s}
+  .rail-ind::before{content:"";position:absolute;left:-8px;top:12px;bottom:12px;width:3px;border-radius:0 3px 3px 0;
+    background:var(--mauve)}
+  .tab{position:relative;z-index:1;display:grid;place-items:center;height:44px;border-radius:12px;color:var(--over);
+    text-decoration:none;transition:color .15s,background-color .15s}
+  .tab svg.i{width:21px;height:21px}
+  .tab:hover{color:var(--text);background:color-mix(in srgb,var(--surface0) 55%,transparent)}
+  .tab[aria-current="page"]{color:var(--text);background:none}
   .tab[aria-current="page"] svg.i{color:var(--mauve)}
   .tab:focus-visible{outline:2px solid var(--mauve);outline-offset:-2px}
-  .badge{position:absolute;top:4px;right:9px;min-width:17px;height:17px;padding:0 5px;border-radius:9px;
-    font:700 11px/17px var(--sans);text-align:center;background:var(--surface2);color:var(--text)}
+  .tab-l{position:absolute;left:calc(100% + 14px);top:50%;display:flex;align-items:center;gap:10px;white-space:nowrap;
+    padding:6px 8px 6px 11px;border-radius:8px;background:var(--surface0);border:1px solid var(--surface1);color:var(--text);
+    font:600 13px/1.2 var(--sans);box-shadow:0 10px 28px -10px #000d;pointer-events:none;
+    opacity:0;transform:translate(-6px,-50%);transition:opacity .12s,transform .16s cubic-bezier(.2,.8,.2,1)}
+  .tab-l kbd{font:600 11px/1 var(--sans);color:var(--over);background:var(--crust);border:1px solid var(--surface1);
+    border-radius:5px;padding:3px 6px}
+  .tab:hover .tab-l,.tab:focus-visible .tab-l{opacity:1;transform:translate(0,-50%);transition-delay:.06s}
+  .badge{position:absolute;top:5px;right:5px;min-width:16px;height:16px;padding:0 4px;border-radius:8px;
+    font:700 10.5px/16px var(--sans);text-align:center;background:var(--surface2);color:var(--text);
+    box-shadow:0 0 0 2px var(--crust)}
   .badge.hot{background:var(--yellow);color:var(--crust)}
   .badge:empty{display:none}
+  /* anonymize on: its icon in teal, so you know it from any view */
+  .tab.anon-on svg.i,.tab.anon-on[aria-current="page"] svg.i{color:var(--teal)}
+  .tab.anon-on::after{content:"";position:absolute;top:9px;right:9px;width:7px;height:7px;border-radius:50%;
+    background:var(--teal);box-shadow:0 0 0 2px var(--crust)}
+  .rail-sp{flex:1}
+  .rail button.tab{border:0;background:none;font:inherit;cursor:pointer;width:100%}
+  .rail button.tab:hover{color:var(--text);background:color-mix(in srgb,var(--surface0) 55%,transparent)}
+  #rail-bell[aria-pressed="true"] svg.i{color:var(--mauve)}
+  .rail-hide[aria-pressed="true"] svg.i{color:var(--mauve)}
+  .rail-edge{display:none}
+  .shell.rail-off{grid-template-columns:0 minmax(0,1fr)}
+  .shell.rail-off .rail{position:fixed;top:0;bottom:0;left:0;width:var(--rail);transform:translateX(-100%);
+    transition:transform .22s cubic-bezier(.2,.8,.2,1),box-shadow .22s}
+  .shell.rail-off.peek .rail{transform:none;box-shadow:14px 0 44px -14px #000e}
+  .shell.rail-off .rail-edge{display:block;position:fixed;left:0;top:0;bottom:0;width:10px;z-index:29}
+  .rail-edge::after{content:"";position:absolute;left:0;top:50%;width:3px;height:44px;margin-top:-22px;border-radius:0 3px 3px 0;
+    background:var(--surface1);transition:background-color .15s,height .2s,margin .2s}
+  .rail-edge:hover::after{background:var(--mauve);height:88px;margin-top:-44px}
   .views{min-width:0;min-height:0;position:relative}
   .view{height:100%;min-height:0}
   .view[hidden]{display:none}
@@ -592,8 +628,9 @@
 
   /* =========================================================== mobile */
   @media (max-width:760px){
-    .shell{grid-template-columns:minmax(0,1fr);grid-template-rows:minmax(0,1fr) auto}
-    .rail{grid-row:2;flex-direction:row;justify-content:space-around;padding:4px 6px;
+    .shell,.shell.rail-off{grid-template-columns:minmax(0,1fr);grid-template-rows:minmax(0,1fr) auto}
+    .shell>.views{grid-column:1;grid-row:1}
+    .rail{grid-column:1;grid-row:2;flex-direction:row;justify-content:space-around;padding:4px 6px;
       padding-bottom:max(4px,env(safe-area-inset-bottom));border-right:0;border-top:1px solid var(--surface0);z-index:20}
     .logo{display:none}
     .tab{flex:1;padding:6px 2px 4px}
@@ -653,18 +690,6 @@
   .att-i button{position:absolute;top:4px;right:4px;width:22px;height:22px;border-radius:50%;border:0;padding:0;
     background:#11111bd9;color:var(--text);display:grid;place-items:center}
   .att-i button svg.i{width:12px;height:12px}
-  /* sidebar: notifications and hide */
-  .rail-sp{flex:1}
-  .rail button.tab{border:0;background:none;font:inherit;font-size:12px;font-weight:600;color:var(--over);cursor:pointer}
-  .rail button.tab:hover{color:var(--text);background:var(--mantle)}
-  #rail-bell[aria-pressed="true"] svg.i{color:var(--mauve)}
-  .shell.rail-off{grid-template-columns:minmax(0,1fr)}
-  .shell.rail-off .rail{display:none}
-  .rail-peek{display:none;position:fixed;left:12px;bottom:14px;z-index:25;width:40px;height:40px;border-radius:12px;
-    border:1px solid var(--surface1);background:var(--crust);color:var(--mauve);place-items:center;padding:0}
-  .rail-peek svg{width:22px;height:22px}
-  .rail-peek:hover{border-color:var(--mauve)}
-  .shell.rail-off .rail-peek{display:grid}
   /* notifications dialog */
   dialog.notify{max-width:min(480px,calc(100vw - 32px))}
   dialog.notify p{white-space:normal}
@@ -687,9 +712,18 @@
     .side .composer{margin:0 12px 10px}
     .show-list,.app.list-off .show-list,.hide-list{display:none}
     .app.list-off .side{display:flex}
-    .rail-hide,.rail-peek,.shell.rail-off .rail-peek{display:none}
-    .shell.rail-off .rail{display:flex}
-    .rail button.tab{font-size:12px}
+    /* on the phone the bar is the bottom tab bar, always there, with names under the icons */
+    .rail .tab.rail-hide,.shell.rail-off .rail-edge,.rail .tab[data-view="mask"]{display:none}
+    .shell.rail-off .rail{position:relative;transform:none;width:auto;box-shadow:none}
+    .rail-tabs{flex-direction:row;flex:6}
+    .rail .tab{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:3px;height:auto;
+      padding:7px 2px 5px;min-width:0}
+    .rail .tab-l{position:static;opacity:1;transform:none;padding:0;border:0;background:none;box-shadow:none;
+      font:600 10.5px/1.1 var(--sans);letter-spacing:-.01em;color:inherit;max-width:100%;overflow:hidden;text-overflow:ellipsis}
+    .rail .tab-l kbd{display:none}
+    #rail-bell .tab-l{display:none}
+    .rail-ind{top:0;bottom:0;height:auto;width:0;right:auto}
+    .rail-ind::before{left:30%;right:30%;top:-5px;bottom:auto;width:auto;height:3px;border-radius:0 0 3px 3px}
     #rail-bell{flex:1}
     .rail-sp{display:none}
   }

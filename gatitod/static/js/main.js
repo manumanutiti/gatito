@@ -1,16 +1,19 @@
-/* Startup: navigation between views (#/, #/backlog, #/week, #/artifacts, #/notebooks, #/profiles),
-   periodic refresh, badges and keyboard shortcuts. Loaded last. */
+/* Startup: navigation between views (#/, #/backlog, #/week, #/artifacts, #/notebooks,
+   #/profiles, #/anonymize), the side bar, periodic refresh, badges and keyboard shortcuts. Loaded last. */
 
-const VIEWS={sessions:'#/',backlog:'#/backlog',week:'#/week',art:'#/artifacts',nb:'#/notebooks',pf:'#/profiles'};
+const VIEWS={sessions:'#/',backlog:'#/backlog',week:'#/week',art:'#/artifacts',nb:'#/notebooks',pf:'#/profiles',mask:'#/anonymize'};
 let VIEW='sessions';
 
 function go(v){if(location.hash!==VIEWS[v])location.hash=VIEWS[v]; else applyRoute()}
 function applyRoute(){
   const h=decodeURIComponent(location.hash.slice(1));
   VIEW=h.startsWith('/backlog')||h.startsWith('bl-')?'backlog':h.startsWith('/week')?'week'
-    :h.startsWith('/artifacts')?'art':h.startsWith('/notebooks')?'nb':h.startsWith('/profiles')?'pf':'sessions';
+    :h.startsWith('/artifacts')?'art':h.startsWith('/notebooks')?'nb':h.startsWith('/profiles')?'pf'
+    :h.startsWith('/anonymize')?'mask':'sessions';
   for(const v in VIEWS)$('#v-'+v).hidden=v!==VIEW;
   document.querySelectorAll('.tab').forEach(t=>t.setAttribute('aria-current',t.dataset.view===VIEW?'page':'false'));
+  railInd(); railPeek(false);
+  if(VIEW==='mask')renderMask(true);
   if(VIEW==='backlog')renderBoard(true);
   if(VIEW==='week')renderWeek(true);
   if(VIEW==='art'){   // #/artifacts/<id>[/v3] opens one; #/artifacts, the gallery
@@ -100,13 +103,32 @@ function toggleList(on){
   const off=on==null?!$('#app').classList.contains('list-off'):!on;
   $('#app').classList.toggle('list-off',off); store('gatito-list-off',off?'1':null);
 }
+// the side bar: always there, or auto-hidden (rail-off) and shown while the pointer is on it
+const RAIL={t:0};
 function toggleRail(on){
   const off=on==null?!$('#shell').classList.contains('rail-off'):!on;
   $('#shell').classList.toggle('rail-off',off); store('gatito-rail-off',off?'1':null);
+  $('#rail-hide').setAttribute('aria-pressed',off);
+  $('#rail-hide-l').firstChild.textContent=off?'Keep the bar open':'Auto-hide the bar';
+  railPeek(false); requestAnimationFrame(railInd);
+}
+function railPeek(on){
+  clearTimeout(RAIL.t);
+  $('#shell').classList.toggle('peek',!!on&&$('#shell').classList.contains('rail-off'));
+}
+// the marker that slides to the open view's tab
+function railInd(){
+  const ind=$('#rail-ind'), t=document.querySelector('#rail-tabs .tab[aria-current="page"]');
+  if(!ind)return;
+  if(!t||!t.offsetWidth){ind.style.opacity=0;return}
+  const vertical=!matchMedia('(max-width:760px)').matches;
+  ind.style.transform=vertical?`translateY(${t.offsetTop}px)`:`translateX(${t.offsetLeft}px)`;
+  ind.style.width=vertical?'':t.offsetWidth+'px'; ind.style.height=vertical?t.offsetHeight+'px':'';
+  ind.style.opacity=1;
 }
 
 async function init(){
-  initBoard(); initWeek(); initArt(); initNb(); initPf(); initHist(); placeComposer();
+  initBoard(); initWeek(); initArt(); initNb(); initPf(); initMask(); initHist(); placeComposer();
   toggleList(stored('gatito-list-off')!=='1'); toggleRail(stored('gatito-rail-off')!=='1');
   addEventListener('resize',placeComposer);
   wireAttach('q',$('#composer'),$('#q-file'),$('#q-attach'));
@@ -147,9 +169,16 @@ $('#q-debug').onclick=()=>{
 };
 $('#hide-list').onclick=()=>toggleList(false);
 document.addEventListener('click',e=>{if(e.target.closest('[data-show-list]'))toggleList(true)});
-$('#rail-hide').onclick=()=>toggleRail(false);
-$('#rail-peek').onclick=()=>toggleRail(true);
+$('#rail-hide').onclick=()=>toggleRail();
 $('#rail-bell').onclick=openNotify;
+// auto-hide: the bar comes out when the pointer touches the left edge (or with the keyboard)
+// and goes back a moment after it leaves; with the pointer still on it, it stays
+$('#rail-edge').onmouseenter=()=>railPeek(true);
+$('#rail').onmouseenter=()=>clearTimeout(RAIL.t);
+$('#rail').onmouseleave=()=>{clearTimeout(RAIL.t);RAIL.t=setTimeout(()=>railPeek(false),260)};
+$('#rail').addEventListener('focusin',()=>railPeek(true));
+$('#rail').addEventListener('focusout',e=>{if(!$('#rail').contains(e.relatedTarget))railPeek(false)});
+addEventListener('resize',railInd);
 
 /* ---------------- shortcuts ---------------- */
 document.addEventListener('keydown',e=>{
@@ -169,6 +198,7 @@ document.addEventListener('keydown',e=>{
   if(e.key==='4')go('art');
   if(e.key==='5')go('nb');
   if(e.key==='6')go('pf');
+  if(e.key==='7')go('mask');
   if(e.key==='n'&&VIEW==='nb'){e.preventDefault();NB.c?newNote():newNotebook();return}
   if(e.key==='n'&&VIEW!=='sessions'){e.preventDefault();openSheet(null,{trigger:VIEW==='week'?'at':'manual'})}
 });
