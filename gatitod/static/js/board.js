@@ -195,6 +195,8 @@ function openSheet(id,preset={}){
         <div><label for="sh-effort">Effort</label><select id="sh-effort">${selOpts('efforts',i.effort,'normal','')}</select></div></div>
       <label class="check"><input type="checkbox" id="sh-wt"${i.worktree?' checked':''}>
         Isolate in a worktree (repo copy on its own branch)</label>
+      <label class="check"><input type="checkbox" id="sh-anon"${(i0?i.anon:anonOn())?' checked':''}>
+        Anonymize: send it with placeholders instead of the real names</label>
       ${runs?`<label>Launches</label><ul class="runs">${runs}</ul>`:''}
     </div>
     <div class="sh-f">
@@ -220,7 +222,7 @@ function openSheet(id,preset={}){
     if(trig==='at'&&!(at>Date.now()))return toast('Pick a date and time that have not passed',true);
     const body={task:$('#sh-task').value,project_id:$('#sh-proj').value,model:$('#sh-model').value,
       mode:$('#sh-mode').value,effort:$('#sh-effort').value||null,worktree:$('#sh-wt').checked,
-      profile:$('#sh-profile').value||null,
+      profile:$('#sh-profile').value||null,anon:$('#sh-anon').checked,
       trigger:trig,at:trig==='at'?at:null,repeat:trig==='at'?($('#sh-rep').value||null):null};
     if(trig==='queue'&&(isNew||i0.trigger!=='queue'))body.rank=queueRank(i0?.id);
     const r=isNew?await api('/api/backlog/add',body):await api('/api/backlog/update',{id:i0.id,...body});
