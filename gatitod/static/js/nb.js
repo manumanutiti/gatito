@@ -33,11 +33,15 @@ function initNb(){
       <button class="btn primary" id="nb-new" type="button">${ICON('plus')}Notebook</button>
     </div></header>
     <div class="nb-body">
+      <button class="nb-focus" id="nb-focus" type="button" aria-pressed="false" title="Hide side panel (Ctrl+\\)"
+        aria-label="Hide side panel">${ICON('sidebar')}</button>
       <div class="nb-home" id="nb-home"></div>
       <aside class="nb-side" id="nb-side" hidden></aside>
       <section class="nb-main" id="nb-main" hidden></section>
     </div>`;
   $('#nb-new').onclick=newNotebook;
+  $('#nb-focus').onclick=()=>nbFocus();
+  try{if(localStorage.getItem('nb-focus'))nbFocus(true)}catch(e){}
   $('#nb-q').oninput=e=>{clearTimeout(NB._t);const v=e.target.value.trim();
     NB._t=setTimeout(()=>searchNb(v),250)};
 }
@@ -88,6 +92,19 @@ function renderSearch(){
       <span class="art-meta">${nbChip('kind',r.kind)}${nbChip('status',r.status)}<span>${esc(r.notebook)}/${esc(r.relpath)}</span></span>
       ${r.snippet?`<span class="nb-frag">${esc(r.snippet)}</span>`:''}</a>`).join('')||'<div class="art-empty">No matches.</div>'}</div>`;
 }
+
+/* ---------------- focus mode: hide the side panel ---------------- */
+function nbFocus(on){
+  if(on===undefined)on=!$('#v-nb').classList.contains('focus');
+  $('#v-nb').classList.toggle('focus',on);
+  const b=$('#nb-focus'); if(!b)return;   // the view is built by initNb
+  b.setAttribute('aria-pressed',on);
+  const t=on?'Show side panel':'Hide side panel'; b.title=t+' (Ctrl+\\)'; b.setAttribute('aria-label',t);
+  try{localStorage.setItem('nb-focus',on?'1':'')}catch(e){}
+}
+document.addEventListener('keydown',e=>{
+  if(e.key==='\\'&&(e.ctrlKey||e.metaKey)&&$('#v-nb').classList.contains('viewing')){e.preventDefault();nbFocus()}
+});
 
 /* ---------------- one notebook ---------------- */
 async function openNb(id,relpath){
